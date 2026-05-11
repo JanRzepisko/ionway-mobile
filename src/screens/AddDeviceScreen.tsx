@@ -357,37 +357,25 @@ export function AddDeviceScreen() {
     const group = formData.group || undefined;
     const type = formData.type || undefined;
 
-    // Load all options in parallel, filtered by what's already selected
+    // Load all options in parallel - always show available options, filtered by parent selections
     const [l, z, s, g, t, dn] = await Promise.all([
-      // Levels - filter by building if selected
-      building 
-        ? getDistinctLevels(currentProject.id, building)
-        : Promise.resolve([]),
+      // Levels - filter by building if selected, otherwise all
+      getDistinctLevels(currentProject.id, building),
       
-      // Zones - filter by building (and level if selected)
-      building 
-        ? getDistinctZones(currentProject.id, building, level || undefined)
-        : Promise.resolve([]),
+      // Zones - filter by building and/or level if selected
+      getDistinctZones(currentProject.id, building, level),
       
-      // Systems - filter by building+level+zone if selected
-      zone 
-        ? getDistinctSystems(currentProject.id, building, level, zone)
-        : Promise.resolve([]),
+      // Systems - filter by selections above
+      getDistinctSystems(currentProject.id, building, level, zone),
       
-      // Groups - filter by building+level+zone+system if selected
-      system 
-        ? getDistinctGroups(currentProject.id, { building, level, zone, system })
-        : Promise.resolve([]),
+      // Groups - filter by selections above
+      getDistinctGroups(currentProject.id, { building, level, zone, system }),
       
-      // Types - filter by building+level+zone+system+group if selected
-      group 
-        ? getDistinctTypes(currentProject.id, { building, level, zone, system, group })
-        : Promise.resolve([]),
+      // Types - filter by selections above
+      getDistinctTypes(currentProject.id, { building, level, zone, system, group }),
       
       // Drawing numbers - filter by all selected fields
-      type 
-        ? getDistinctDrawingNumbers(currentProject.id, { building, level, zone, system, group, type })
-        : Promise.resolve([]),
+      getDistinctDrawingNumbers(currentProject.id, { building, level, zone, system, group, type }),
     ]);
 
     setLevels(l);
@@ -398,28 +386,77 @@ export function AddDeviceScreen() {
     setDrawingNumbers(dn);
   };
 
-  const updateField = useCallback((field: keyof FormData, value: string) => {
-    setFormData(prev => {
-      const newData = { ...prev, [field]: value };
-      
-      // Clear downstream fields when upstream changes (cascading)
-      const fieldOrder: (keyof FormData)[] = ['building', 'level', 'zone', 'system', 'group', 'type', 'drawingNumber'];
-      const index = fieldOrder.indexOf(field);
-      
-      if (index !== -1 && prev[field] !== value) {
-        // Clear all fields after the changed one
-        for (let i = index + 1; i < fieldOrder.length; i++) {
-          newData[fieldOrder[i]] = '';
-        }
-      }
-      
-      return newData;
-    });
+  const updateField = useCallback(async (field: keyof FormData, value: string) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
     
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: undefined }));
     }
-  }, [errors]);
+    
+    // Auto-fill parent fields if they can be uniquely determined
+    if (currentProject && value) {
+      const autoFillParents = async () => {
+        const db = await import('../database');
+        const newData: Partial<FormData> = {};
+        
+        // When selecting a lower field, try to find unique parent values
+        if (field === 'level' && !formData.building) {
+          // Find which building this level is in
+          const buildings = await db.getDistinctBuildings(currentProject.id);
+          for (const b of buildings) {
+            const levelsInBuilding = await db.getDistinctLevels(currentProject.id, b);
+            if (levelsInBuilding.includes(value)) {
+              // Check if this level only exists in one building
+              const matchingBuildings = [];
+              for (const building of buildings) {
+                const levels = await db.getDistinctLevels(currentProject.id, building);
+                if (levels.includes(value)) matchingBuildings.push(building);
+              }
+              if (matchingBuildings.length === 1) {
+                newData.building = matchingBuildings[0];
+              }
+              break;
+            }
+          }
+        }
+        
+        if (field === 'zone' && (!formData.building || !formData.level)) {
+          // Find building and level for this zone
+          const buildings = formData.building ? [formData.building] : await db.getDistinctBuildings(currentProject.id);
+          let foundBuilding: string | undefined;
+          let foundLevel: string | undefined;
+          let uniqueMatch = true;
+          
+          for (const b of buildings) {
+            const levels = await db.getDistinctLevels(currentProject.id, b);
+            for (const l of levels) {
+              const zones = await db.getDistinctZones(currentProject.id, b, l);
+              if (zones.includes(value)) {
+                if (foundBuilding && (foundBuilding !== b || foundLevel !== l)) {
+                  uniqueMatch = false;
+                  break;
+                }
+                foundBuilding = b;
+                foundLevel = l;
+              }
+            }
+            if (!uniqueMatch) break;
+          }
+          
+          if (uniqueMatch && foundBuilding && foundLevel) {
+            if (!formData.building) newData.building = foundBuilding;
+            if (!formData.level) newData.level = foundLevel;
+          }
+        }
+        
+        if (Object.keys(newData).length > 0) {
+          setFormData(prev => ({ ...prev, ...newData }));
+        }
+      };
+      
+      autoFillParents();
+    }
+  }, [errors, currentProject, formData.building, formData.level]);
 
   const validate = (): boolean => {
     const newErrors: Partial<FormData> = {};

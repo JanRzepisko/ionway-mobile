@@ -815,7 +815,7 @@ export function DevicesScreen() {
     return () => clearInterval(interval);
   }, []);
 
-  // Load cascading filter options
+  // Load cascading filter options - always show all available, filtered by selections above
   const loadCascadingFilterOptions = useCallback(async () => {
     if (!currentProject) return;
 
@@ -823,17 +823,19 @@ export function DevicesScreen() {
     const buildings = await getDistinctBuildings(currentProject.id);
     setAvailableBuildings(buildings);
 
-    // Levels - filter by selected buildings
+    // Levels - filter by selected buildings if any, otherwise show all
     if (selectedBuildings.length > 0) {
       const levelsPromises = selectedBuildings.map(b => getDistinctLevels(currentProject.id, b));
       const levelsArrays = await Promise.all(levelsPromises);
       const uniqueLevels = [...new Set(levelsArrays.flat())].sort();
       setAvailableLevels(uniqueLevels);
     } else {
-      setAvailableLevels([]);
+      // Show all levels if no building selected
+      const allLevels = await getDistinctLevels(currentProject.id);
+      setAvailableLevels(allLevels);
     }
 
-    // Zones - filter by selected buildings AND levels
+    // Zones - filter by selections, but always show available zones
     if (selectedBuildings.length > 0 && selectedLevels.length > 0) {
       const zonesPromises: Promise<string[]>[] = [];
       for (const b of selectedBuildings) {
@@ -844,13 +846,24 @@ export function DevicesScreen() {
       const zonesArrays = await Promise.all(zonesPromises);
       const uniqueZones = [...new Set(zonesArrays.flat())].sort();
       setAvailableZones(uniqueZones);
+    } else if (selectedBuildings.length > 0) {
+      // Show zones for selected buildings (any level)
+      const zonesPromises = selectedBuildings.map(b => getDistinctZones(currentProject.id, b));
+      const zonesArrays = await Promise.all(zonesPromises);
+      const uniqueZones = [...new Set(zonesArrays.flat())].sort();
+      setAvailableZones(uniqueZones);
     } else {
-      setAvailableZones([]);
+      // Show all zones if nothing selected
+      const allZones = await getDistinctZones(currentProject.id);
+      setAvailableZones(allZones);
     }
 
-    // Types - filter by all selected criteria
+    // Types - always show, filtered by current selections
+    const typeFilters: { building?: string; level?: string; zone?: string } = {};
+    // Build filter based on what's selected
+    const typesPromises: Promise<string[]>[] = [];
+    
     if (selectedBuildings.length > 0 && selectedLevels.length > 0 && selectedZones.length > 0) {
-      const typesPromises: Promise<string[]>[] = [];
       for (const b of selectedBuildings) {
         for (const l of selectedLevels) {
           for (const z of selectedZones) {
@@ -858,12 +871,23 @@ export function DevicesScreen() {
           }
         }
       }
-      const typesArrays = await Promise.all(typesPromises);
-      const uniqueTypes = [...new Set(typesArrays.flat())].sort();
-      setAvailableTypes(uniqueTypes);
+    } else if (selectedBuildings.length > 0 && selectedLevels.length > 0) {
+      for (const b of selectedBuildings) {
+        for (const l of selectedLevels) {
+          typesPromises.push(getDistinctTypes(currentProject.id, { building: b, level: l }));
+        }
+      }
+    } else if (selectedBuildings.length > 0) {
+      for (const b of selectedBuildings) {
+        typesPromises.push(getDistinctTypes(currentProject.id, { building: b }));
+      }
     } else {
-      setAvailableTypes([]);
+      typesPromises.push(getDistinctTypes(currentProject.id, {}));
     }
+    
+    const typesArrays = await Promise.all(typesPromises);
+    const uniqueTypes = [...new Set(typesArrays.flat())].sort();
+    setAvailableTypes(uniqueTypes);
   }, [currentProject, selectedBuildings, selectedLevels, selectedZones]);
 
   // Reload filter options when selections change
@@ -871,26 +895,17 @@ export function DevicesScreen() {
     loadCascadingFilterOptions();
   }, [loadCascadingFilterOptions]);
 
-  // Clear downstream filters when upstream changes
+  // Filter change handlers - don't clear downstream, let user select freely
   const handleBuildingFilterChange = useCallback((buildings: string[]) => {
     setSelectedBuildings(buildings);
-    // Clear downstream selections that are no longer valid
-    setSelectedLevels([]);
-    setSelectedZones([]);
-    setSelectedTypes([]);
   }, []);
 
   const handleLevelFilterChange = useCallback((levels: string[]) => {
     setSelectedLevels(levels);
-    // Clear downstream selections
-    setSelectedZones([]);
-    setSelectedTypes([]);
   }, []);
 
   const handleZoneFilterChange = useCallback((zones: string[]) => {
     setSelectedZones(zones);
-    // Clear downstream selections
-    setSelectedTypes([]);
   }, []);
 
   const handleTypeFilterChange = useCallback((types: string[]) => {
