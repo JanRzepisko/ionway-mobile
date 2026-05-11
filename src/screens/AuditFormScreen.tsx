@@ -675,20 +675,6 @@ export function AuditFormScreen() {
           </View>
         )}
 
-        {/* Info banner for batch audit */}
-        {isBatchAudit && !isPreviewMode && (
-          <TouchableOpacity 
-            style={styles.batchInfoBanner}
-            onPress={() => setShowElementsModal(true)}
-          >
-            <Icon name="information" size={20} color={colors.primary} />
-            <Text style={styles.batchInfoText}>
-              Wypełniasz formularz dla {allDeviceIds.length} elementów naraz
-            </Text>
-            <Icon name="chevron-right" size={20} color={colors.primary} />
-          </TouchableOpacity>
-        )}
-
         {/* Collapsible Device info card - show first device as reference */}
         <TouchableOpacity 
           style={styles.deviceCard}
@@ -697,11 +683,11 @@ export function AuditFormScreen() {
         >
           <View style={styles.deviceHeader}>
             <View style={styles.deviceIcon}>
-              <Icon name={isBatchAudit ? "checkbox-multiple-marked" : "map-marker"} size={24} color={colors.primary} />
+              <Icon name={isBatchAudit ? "checkbox-multiple-marked" : "map-marker"} size={18} color={colors.primary} />
             </View>
             <View style={styles.deviceHeaderInfo}>
               <Text style={styles.deviceHeaderTitle}>
-                {isBatchAudit ? `${allDeviceIds.length} elementów` : 'Element'}
+                {isBatchAudit ? `${allDeviceIds.length} ELEMENTÓW` : 'ELEMENT'}
               </Text>
               <Text style={styles.deviceHeaderSubtitle} numberOfLines={1}>
                 {isBatchAudit 
@@ -712,7 +698,7 @@ export function AuditFormScreen() {
             </View>
             <Icon 
               name={locationExpanded ? "chevron-up" : "chevron-down"} 
-              size={24} 
+              size={20} 
               color={colors.textSecondary} 
             />
           </View>
@@ -1279,10 +1265,10 @@ const styles = StyleSheet.create({
   // Device Card
   deviceCard: {
     marginHorizontal: screen.isTablet ? spacing.xl : spacing.md,
-    marginBottom: spacing.md,
-    padding: screen.isTablet ? spacing.lg : spacing.md,
+    marginBottom: spacing.sm,
+    padding: screen.isTablet ? spacing.md : spacing.sm,
     backgroundColor: colors.surfaceVariant,
-    borderRadius: borderRadius.lg,
+    borderRadius: borderRadius.md,
     maxWidth: screen.isTablet ? 800 : undefined,
     alignSelf: screen.isTablet ? 'center' : undefined,
     width: screen.isTablet ? '100%' : undefined,
@@ -1293,33 +1279,32 @@ const styles = StyleSheet.create({
   },
   deviceHeaderInfo: {
     flex: 1,
-    marginLeft: spacing.sm,
+    marginLeft: spacing.xs,
   },
   deviceHeaderTitle: {
-    ...typography.labelMedium,
+    ...typography.labelSmall,
     color: colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   deviceHeaderSubtitle: {
-    ...typography.bodyMedium,
+    ...typography.bodySmall,
     color: colors.textPrimary,
     fontWeight: '500',
-    marginTop: 2,
   },
   deviceDivider: {
     height: 1,
     backgroundColor: colors.outline,
-    marginVertical: spacing.md,
+    marginVertical: spacing.sm,
   },
   deviceRow: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   deviceIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: borderRadius.md,
+    width: 32,
+    height: 32,
+    borderRadius: borderRadius.sm,
     backgroundColor: colors.primaryLight,
     alignItems: 'center',
     justifyContent: 'center',
