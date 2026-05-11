@@ -23,7 +23,7 @@ import { FormTab, AuditAnswer, Device } from '../types';
 
 type RootStackParamList = {
   Devices: undefined;
-  AuditForm: { deviceId: string; deviceIds?: string[]; preview?: boolean };
+  AuditForm: { deviceId: string; deviceIds?: string[]; sessionId?: string; preview?: boolean };
 };
 
 type AuditFormRouteProp = RouteProp<RootStackParamList, 'AuditForm'>;
@@ -41,7 +41,7 @@ export function AuditFormScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const route = useRoute<AuditFormRouteProp>();
   const insets = useSafeAreaInsets();
-  const { deviceId, deviceIds, preview: isPreviewMode = false } = route.params;
+  const { deviceId, deviceIds, sessionId, preview: isPreviewMode = false } = route.params;
   
   // Batch audit state - elements can have same or different answers per field
   const allDeviceIds = deviceIds && deviceIds.length > 0 ? deviceIds : [deviceId];
@@ -66,6 +66,7 @@ export function AuditFormScreen() {
     isSaving,
     error,
     startAudit,
+    resumeAudit,
     setCurrentTab,
     saveAnswer,
     completeAudit,
@@ -103,14 +104,18 @@ export function AuditFormScreen() {
     }, [currentSession?.status, navigation])
   );
 
-  // Start audit for first device (form config is shared)
-  // For batch audit, we start sessions for all devices but use first device's form
+  // Start or resume audit
+  // If sessionId is provided (viewing existing audit), resume it
+  // Otherwise start new audit for first device
   useEffect(() => {
-    if (currentProject && user && allDeviceIds.length > 0) {
-      // Start audit for first device to get form config
+    if (sessionId) {
+      // Resume existing audit session (e.g., viewing completed audit)
+      resumeAudit(sessionId);
+    } else if (currentProject && user && allDeviceIds.length > 0) {
+      // Start new audit for first device to get form config
       startAudit(allDeviceIds[0], currentProject.id, user.id);
     }
-  }, [currentProject?.id, user?.id, allDeviceIds[0]]);
+  }, [currentProject?.id, user?.id, allDeviceIds[0], sessionId]);
 
   // For batch audit: Load existing answers from in-progress sessions and detect differences
   useEffect(() => {

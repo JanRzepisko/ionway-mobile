@@ -25,7 +25,7 @@ import { DemoFormScreen } from '../screens/DemoFormScreen';
 export type RootStackParamList = {
   Auth: undefined;
   Main: undefined;
-  AuditForm: { deviceId: string; deviceIds?: string[] };
+  AuditForm: { deviceId: string; deviceIds?: string[]; sessionId?: string; preview?: boolean };
   AddDevice: undefined;
   NewForm: undefined;
   DemoForm: undefined;

@@ -364,9 +364,9 @@ export function AddDeviceScreen() {
         ? getDistinctLevels(currentProject.id, building)
         : Promise.resolve([]),
       
-      // Zones - filter by building+level if selected
-      level 
-        ? getDistinctZones(currentProject.id, building, level)
+      // Zones - filter by building (and level if selected)
+      building 
+        ? getDistinctZones(currentProject.id, building, level || undefined)
         : Promise.resolve([]),
       
       // Systems - filter by building+level+zone if selected

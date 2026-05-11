@@ -26,7 +26,7 @@ import { getAllAuditSessions, getDeviceById } from '../database';
 type FilterStatus = 'all' | 'completed' | 'in_progress' | 'pending' | 'synced';
 
 type RootStackParamList = {
-  AuditForm: { deviceId: string; sessionId?: string };
+  AuditForm: { deviceId: string; sessionId?: string; preview?: boolean };
 };
 
 export function MyAuditsScreen() {
@@ -292,7 +292,11 @@ export function MyAuditsScreen() {
           return (
             <TouchableOpacity 
               style={styles.sessionCard}
-              onPress={() => navigation.navigate('AuditForm', { deviceId: item.deviceId })}
+              onPress={() => navigation.navigate('AuditForm', { 
+                deviceId: item.deviceId, 
+                sessionId: item.localId,
+                preview: item.status === 'completed' || item.status === 'synced'
+              })}
               activeOpacity={0.7}
             >
               <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
