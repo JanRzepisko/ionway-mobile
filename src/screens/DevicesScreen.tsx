@@ -1085,7 +1085,7 @@ export function DevicesScreen() {
 
           <View style={styles.selectionButtons}>
             <TouchableOpacity style={styles.selectAllButton} onPress={selectAllVisible}>
-              <Icon name="checkbox-multiple-marked-outline" size={18} color={colors.primary} />
+              <Icon name="checkbox-multiple-marked-outline" size={20} color={colors.primary} />
               <Text style={styles.selectAllText}>Zaznacz wszystkie</Text>
             </TouchableOpacity>
             {selectedDevices.size > 0 && (
@@ -1656,14 +1656,17 @@ const styles = StyleSheet.create({
   selectAllButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: spacing.sm,
     paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.primaryLight,
-    borderRadius: 10,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    minHeight: 48,
   },
   selectAllText: { 
-    fontSize: 12,
+    fontSize: 14,
     color: colors.primary,
     fontWeight: '600',
   },
