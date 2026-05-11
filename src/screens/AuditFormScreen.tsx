@@ -1269,14 +1269,10 @@ const styles = StyleSheet.create({
   
   // Device Card
   deviceCard: {
-    marginHorizontal: screen.isTablet ? spacing.xl : spacing.md,
     marginBottom: spacing.sm,
-    padding: screen.isTablet ? spacing.md : spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.surfaceVariant,
-    borderRadius: borderRadius.md,
-    maxWidth: screen.isTablet ? 800 : undefined,
-    alignSelf: screen.isTablet ? 'center' : undefined,
-    width: screen.isTablet ? '100%' : undefined,
   },
   deviceHeader: {
     flexDirection: 'row',
