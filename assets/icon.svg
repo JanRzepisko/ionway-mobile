@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a56db;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b82f6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="200" fill="url(#grad)"/>
+  <!-- Clipboard body -->
+  <rect x="280" y="280" width="464" height="560" rx="48" fill="white" opacity="0.95"/>
+  <!-- Clipboard clip -->
+  <rect x="392" y="240" width="240" height="96" rx="16" fill="white"/>
+  <rect x="440" y="216" width="144" height="64" rx="12" fill="url(#grad)"/>
+  <!-- Letter A centered -->
+  <path d="M512 380 L400 680 L448 680 L476 600 L548 600 L576 680 L624 680 L512 380 Z M496 552 L512 496 L528 552 Z" fill="url(#grad)"/>
+  <!-- Checkmarks -->
+  <path d="M336 440 L360 464 L400 416" stroke="url(#grad)" stroke-width="16" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M336 540 L360 564 L400 516" stroke="url(#grad)" stroke-width="16" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M336 640 L360 664 L400 616" stroke="url(#grad)" stroke-width="16" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Lines -->
+  <rect x="624" y="432" width="80" height="16" rx="8" fill="url(#grad)" opacity="0.6"/>
+  <rect x="624" y="532" width="80" height="16" rx="8" fill="url(#grad)" opacity="0.6"/>
+  <rect x="624" y="632" width="80" height="16" rx="8" fill="url(#grad)" opacity="0.6"/>
+</svg>

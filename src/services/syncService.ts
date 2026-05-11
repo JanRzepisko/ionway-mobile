@@ -1,0 +1,558 @@
+// =============================================================================
+// Sync Service - Download & Upload Data
+// =============================================================================
+
+import * as Crypto from 'expo-crypto';
+import * as Network from 'expo-network';
+import { 
+  downloadProjectData, 
+  uploadProjectData, 
+  getErrorMessage 
+} from './api';
+import { saveProject, updateProjectSyncState } from '../database/projects';
+import { 
+  saveDevices, 
+  deleteDevicesByProject, 
+  getPendingDevices,
+  updateDeviceSyncStatus,
+  getDeviceCount,
+  getDevice
+} from '../database/devices';
+import { 
+  saveFormTabs, 
+  saveFormFields, 
+  saveOptionSets, 
+  saveOptionValues,
+  clearFormConfigByProject 
+} from '../database/formConfig';
+import { 
+  getPendingAuditSessions, 
+  getAnswersBySession,
+  updateAuditSessionSyncStatus,
+  updateAnswerSyncStatus 
+} from '../database/audits';
+import { 
+  Device, 
+  FormTab, 
+  FormField, 
+  OptionSet, 
+  OptionValue,
+  MobileUploadRequest,
+  MobileNewDevice,
+  MobileAuditSession,
+  MobileAuditAnswer,
+  SyncStatus,
+  TabType,
+  FieldType
+} from '../types';
+
+// Mobile device ID (unique per installation)
+let mobileDeviceId: string | null = null;
+
+export async function getMobileDeviceId(): Promise<string> {
+  if (mobileDeviceId) return mobileDeviceId;
+  
+  // Generate UUID using expo-crypto
+  mobileDeviceId = Crypto.randomUUID();
+  return mobileDeviceId;
+}
+
+// Map numeric field type from backend to string field type for frontend
+function mapFieldType(fieldType: string | number): FieldType {
+  // If it's already a string, convert to lowercase
+  if (typeof fieldType === 'string') {
+    const lower = fieldType.toLowerCase();
+    // Handle both "text" and "Text" formats
+    switch (lower) {
+      case 'text': return 'text';
+      case 'textarea': return 'textArea';
+      case 'number': return 'number';
+      case 'select': return 'select';
+      case 'radio': return 'radio';
+      case 'checkbox': return 'checkbox';
+      case 'slider': return 'slider';
+      case 'extendedlist': return 'extendedList';
+      case 'readonlyinfo': return 'readonlyInfo';
+      case 'date': return 'date';
+      case 'photo': return 'photo';
+      case 'signature': return 'signature';
+      default: return 'text';
+    }
+  }
+  
+  // Numeric field type mapping (from backend enum)
+  const numericType = Number(fieldType);
+  switch (numericType) {
+    case 1: return 'text';
+    case 2: return 'select';
+    case 3: return 'radio';
+    case 4: return 'checkbox';
+    case 5: return 'slider';
+    case 6: return 'extendedList';
+    case 7: return 'readonlyInfo';
+    case 8: return 'number';
+    case 9: return 'date';
+    case 10: return 'photo';
+    case 11: return 'signature';
+    case 12: return 'textArea';
+    default: return 'text';
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Network Check
+// -----------------------------------------------------------------------------
+
+export async function isOnline(): Promise<boolean> {
+  try {
+    const networkState = await Network.getNetworkStateAsync();
+    return networkState.isConnected === true && networkState.isInternetReachable === true;
+  } catch {
+    return false;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Download Sync
+// -----------------------------------------------------------------------------
+
+export interface DownloadResult {
+  success: boolean;
+  message: string;
+  stats?: {
+    devices: number;
+    tabs: number;
+    fields: number;
+    optionSets: number;
+  };
+}
+
+export async function downloadProject(
+  projectId: string,
+  lastSyncAt?: number,
+  lastKnownImportVersion?: number,
+  onProgress?: (message: string) => void
+): Promise<DownloadResult> {
+  try {
+    console.log('[SYNC] Starting download for project:', projectId);
+    
+    const online = await isOnline();
+    console.log('[SYNC] Online status:', online);
+    
+    if (!online) {
+      return { 
+        success: false, 
+        message: 'Brak połączenia z internetem' 
+      };
+    }
+
+    onProgress?.('Łączenie z serwerem...');
+    
+    const deviceId = await getMobileDeviceId();
+    console.log('[SYNC] Device ID:', deviceId);
+    console.log('[SYNC] Calling API...');
+    
+    const response = await downloadProjectData(
+      projectId, 
+      deviceId, 
+      lastSyncAt, 
+      lastKnownImportVersion
+    );
+    
+    console.log('[SYNC] API response received:', response?.projectName);
+
+    onProgress?.('Czyszczenie starych danych...');
+    
+    // Clear existing data if full sync
+    if (response.fullSync) {
+      await clearFormConfigByProject(projectId);
+      await deleteDevicesByProject(projectId);
+    }
+
+    onProgress?.('Zapisywanie projektu...');
+    
+    // Save project
+    await saveProject({
+      id: projectId,
+      name: response.projectName,
+      status: 'active',
+      importVersion: response.importVersion,
+      lastSyncAt: Date.now(),
+      deviceCount: response.stats.totalDevices,
+    });
+
+    onProgress?.('Zapisywanie konfiguracji formularzy...');
+
+    // Save form config
+    const { tabs, optionSets } = response.formConfig;
+    
+    // Map and save tabs with fields
+    const formTabs: FormTab[] = [];
+    const formFields: FormField[] = [];
+    
+    for (const apiTab of tabs) {
+      formTabs.push({
+        id: apiTab.id,
+        projectId,
+        tabNumber: apiTab.tabNumber,
+        tabType: apiTab.tabType as TabType,
+        title: apiTab.title,
+        displayOrder: apiTab.displayOrder,
+        isActive: apiTab.isActive,
+      });
+      
+      for (const apiField of apiTab.fields) {
+        formFields.push({
+          id: apiField.id,
+          projectId,
+          formTabId: apiField.formTabId,
+          sourceRowNumber: apiField.sourceRowNumber,
+          logicalDataColumnNumber: apiField.logicalDataColumnNumber,
+          tabNumber: apiField.tabNumber,
+          tabType: apiField.tabType as TabType,
+          displayOrder: apiField.displayOrder,
+          fieldType: mapFieldType(apiField.fieldType),
+          label: apiField.label,
+          description: apiField.description,
+          question: apiField.question,
+          optionSetId: apiField.optionSetId,
+          targetDataColumnName: apiField.targetDataColumnName,
+          isRequired: apiField.isRequired,
+          isVisible: apiField.isVisible,
+          isActive: apiField.isActive,
+          defaultValue: apiField.defaultValue,
+          validationRulesJson: apiField.validationRulesJson,
+        });
+      }
+    }
+    
+    await saveFormTabs(formTabs);
+    await saveFormFields(formFields);
+
+    onProgress?.('Zapisywanie zestawów opcji...');
+
+    // Save option sets and values
+    const optionSetEntities: OptionSet[] = [];
+    const optionValueEntities: OptionValue[] = [];
+    
+    for (const apiOptionSet of optionSets) {
+      optionSetEntities.push({
+        id: apiOptionSet.id,
+        projectId,
+        code: apiOptionSet.code,
+        name: apiOptionSet.name,
+        source: apiOptionSet.source,
+      });
+      
+      for (const apiValue of apiOptionSet.values) {
+        optionValueEntities.push({
+          id: apiValue.id,
+          optionSetId: apiOptionSet.id,
+          value: apiValue.value,
+          label: apiValue.label,
+          displayOrder: apiValue.displayOrder,
+          isActive: true,
+        });
+      }
+    }
+    
+    await saveOptionSets(optionSetEntities);
+    await saveOptionValues(optionValueEntities);
+
+    onProgress?.('Zapisywanie urządzeń...');
+
+    // Save devices
+    const devices: Device[] = response.devices.map(apiDevice => ({
+      id: apiDevice.id,
+      localId: apiDevice.id,
+      serverId: apiDevice.id,
+      projectId,
+      elementId: apiDevice.elementId,
+      name: apiDevice.name,
+      znacznik: apiDevice.znacznik,
+      building: apiDevice.building,
+      level: apiDevice.level,
+      zone: apiDevice.zone,
+      system: apiDevice.system,
+      group: apiDevice.group,
+      type: apiDevice.type,
+      drawingNumber: apiDevice.drawingNumber,
+      routeNumber: apiDevice.routeNumber,
+      disciplineCode: apiDevice.disciplineCode,
+      isNew: apiDevice.isNew,
+      createdLocally: false,
+      createdAt: Date.now(),
+      auditCount: apiDevice.auditCount,
+      lastAuditAt: apiDevice.lastAuditAt ? new Date(apiDevice.lastAuditAt).getTime() : undefined,
+      additionalDataJson: apiDevice.additionalDataJson,
+      syncStatus: 'synced' as SyncStatus,
+    }));
+    
+    await saveDevices(devices);
+
+    onProgress?.('Synchronizacja zakończona');
+
+    // Update project sync state
+    await updateProjectSyncState(projectId, response.importVersion, devices.length);
+
+    console.log('[SYNC] Download completed successfully');
+    return {
+      success: true,
+      message: 'Dane pobrane pomyślnie',
+      stats: {
+        devices: devices.length,
+        tabs: formTabs.length,
+        fields: formFields.length,
+        optionSets: optionSetEntities.length,
+      },
+    };
+  } catch (error) {
+    console.error('[SYNC] Download error:', error);
+    return {
+      success: false,
+      message: getErrorMessage(error),
+    };
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Upload Sync
+// -----------------------------------------------------------------------------
+
+export interface UploadResult {
+  success: boolean;
+  message: string;
+  stats?: {
+    devicesUploaded: number;
+    auditsUploaded: number;
+    answersUploaded: number;
+  };
+}
+
+export async function uploadProject(
+  projectId: string,
+  importVersion: number,
+  onProgress?: (message: string) => void
+): Promise<UploadResult> {
+  try {
+    const online = await isOnline();
+    if (!online) {
+      return { 
+        success: false, 
+        message: 'Brak połączenia z internetem' 
+      };
+    }
+
+    onProgress?.('Przygotowywanie danych...');
+
+    // Get pending devices
+    const pendingDevices = await getPendingDevices(projectId);
+    
+    // Get pending audit sessions
+    const pendingSessions = await getPendingAuditSessions(projectId);
+
+    if (pendingDevices.length === 0 && pendingSessions.length === 0) {
+      return {
+        success: true,
+        message: 'Brak danych do wysłania',
+        stats: { devicesUploaded: 0, auditsUploaded: 0, answersUploaded: 0 },
+      };
+    }
+
+    onProgress?.('Wysyłanie danych...');
+
+    // Build upload request
+    const deviceId = await getMobileDeviceId();
+    
+    const newDevices: MobileNewDevice[] = pendingDevices.map(d => ({
+      mobileLocalId: d.localId,
+      elementId: d.elementId,
+      name: d.name,
+      znacznik: d.znacznik,
+      building: d.building,
+      level: d.level,
+      zone: d.zone,
+      system: d.system,
+      group: d.group,
+      type: d.type,
+      drawingNumber: d.drawingNumber,
+      routeNumber: d.routeNumber,
+      disciplineCode: d.disciplineCode,
+      createdAt: new Date(d.createdAt).toISOString(),
+      additionalDataJson: d.additionalDataJson,
+    }));
+
+    const auditSessions: MobileAuditSession[] = [];
+    
+    for (const session of pendingSessions) {
+      const answers = await getAnswersBySession(session.localId);
+      
+      const mobileAnswers: MobileAuditAnswer[] = answers.map(a => ({
+        mobileLocalId: a.localId,
+        formFieldId: a.formFieldId,
+        logicalDataColumnNumber: a.logicalDataColumnNumber,
+        valueText: a.valueText,
+        valueJson: a.valueJson,
+        comment: a.comment,
+        answeredAt: new Date(a.answeredAt).toISOString(),
+      }));
+
+      // Get device - first check pending devices, then fetch from DB
+      let device = pendingDevices.find(d => d.localId === session.deviceLocalId);
+      
+      // If device is not in pending (already synced), fetch it from DB to get serverId
+      if (!device) {
+        device = await getDevice(session.deviceLocalId) ?? undefined;
+      }
+      
+      // Use device's serverId if available
+      const deviceServerId = device?.serverId;
+      const isNewDevice = device && !device.serverId;
+      
+      console.log('[SYNC] Processing audit session:', {
+        sessionLocalId: session.localId,
+        deviceLocalId: session.deviceLocalId,
+        deviceFound: !!device,
+        deviceServerId,
+        isNewDevice,
+        answersCount: mobileAnswers.length,
+      });
+      
+      auditSessions.push({
+        mobileLocalId: session.localId,
+        deviceId: deviceServerId,
+        deviceMobileLocalId: isNewDevice ? session.deviceLocalId : undefined,
+        status: session.status,
+        startedAt: new Date(session.startedAt).toISOString(),
+        completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : undefined,
+        notes: session.notes,
+        answers: mobileAnswers,
+      });
+    }
+    
+    console.log('[SYNC] Upload request:', {
+      projectId,
+      newDevicesCount: newDevices.length,
+      auditSessionsCount: auditSessions.length,
+      auditSessions: auditSessions.map(a => ({
+        mobileLocalId: a.mobileLocalId,
+        deviceId: a.deviceId,
+        deviceMobileLocalId: a.deviceMobileLocalId,
+        answersCount: a.answers.length,
+      })),
+    });
+
+    const request: MobileUploadRequest = {
+      projectId,
+      mobileDeviceId: deviceId,
+      importVersion,
+      uploadedAt: new Date().toISOString(),
+      newDevices,
+      auditSessions,
+    };
+
+    // Update status to uploading
+    for (const device of pendingDevices) {
+      await updateDeviceSyncStatus(device.localId, 'uploading');
+    }
+    for (const session of pendingSessions) {
+      await updateAuditSessionSyncStatus(session.localId, 'uploading');
+    }
+
+    // Send to server
+    console.log('[SYNC] Sending upload request...');
+    const response = await uploadProjectData(projectId, request);
+    
+    console.log('[SYNC] Upload response:', {
+      success: response.success,
+      errors: response.errors,
+      deviceResults: response.deviceResults,
+      auditResults: response.auditResults,
+      stats: response.stats,
+    });
+
+    onProgress?.('Aktualizowanie statusów...');
+
+    if (response.success) {
+      // Update device statuses
+      for (const result of response.deviceResults) {
+        if (result.success) {
+          await updateDeviceSyncStatus(result.mobileLocalId, 'synced', result.serverId);
+        } else {
+          await updateDeviceSyncStatus(result.mobileLocalId, 'upload_error');
+        }
+      }
+
+      // Update audit statuses
+      for (const result of response.auditResults) {
+        if (result.success) {
+          await updateAuditSessionSyncStatus(result.mobileLocalId, 'synced', result.serverId);
+          
+          // Update answer statuses
+          const answers = await getAnswersBySession(result.mobileLocalId);
+          for (const answer of answers) {
+            await updateAnswerSyncStatus(answer.localId, 'synced');
+          }
+        } else {
+          await updateAuditSessionSyncStatus(result.mobileLocalId, 'upload_error');
+        }
+      }
+
+      return {
+        success: true,
+        message: 'Dane wysłane pomyślnie',
+        stats: {
+          devicesUploaded: response.stats.devicesCreated,
+          auditsUploaded: response.stats.auditsCreated,
+          answersUploaded: response.stats.answersCreated,
+        },
+      };
+    } else {
+      // Revert to pending status
+      for (const device of pendingDevices) {
+        await updateDeviceSyncStatus(device.localId, 'upload_error');
+      }
+      for (const session of pendingSessions) {
+        await updateAuditSessionSyncStatus(session.localId, 'upload_error');
+      }
+
+      return {
+        success: false,
+        message: response.errors?.join(', ') || 'Błąd wysyłania danych',
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: getErrorMessage(error),
+    };
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Sync Status
+// -----------------------------------------------------------------------------
+
+export interface SyncStatusInfo {
+  isOnline: boolean;
+  pendingDevices: number;
+  pendingAudits: number;
+  totalDevices: number;
+  lastSyncAt?: number;
+  importVersion: number;
+}
+
+export async function getSyncStatus(projectId: string): Promise<SyncStatusInfo> {
+  const online = await isOnline();
+  const pendingDevices = await getPendingDevices(projectId);
+  const pendingAudits = await getPendingAuditSessions(projectId);
+  const totalDevices = await getDeviceCount(projectId);
+
+  return {
+    isOnline: online,
+    pendingDevices: pendingDevices.length,
+    pendingAudits: pendingAudits.length,
+    totalDevices,
+    importVersion: 0, // Would come from sync state
+  };
+}
