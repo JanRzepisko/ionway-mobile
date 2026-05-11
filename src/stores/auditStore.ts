@@ -229,7 +229,20 @@ export const useAuditStore = create<AuditState>((set, get) => ({
         throw new Error('Sesja audytu nie znaleziona');
       }
       
-      const device = await getDevice(session.deviceId);
+      // Try to get device by deviceId first, then by deviceLocalId
+      let device = await getDevice(session.deviceId);
+      if (!device && session.deviceLocalId) {
+        device = await getDevice(session.deviceLocalId);
+      }
+      
+      if (!device) {
+        // Device not found - show clear error with sync status info
+        const syncInfo = session.syncStatus === 'synced' 
+          ? '' 
+          : ` (status synchronizacji: ${session.syncStatus})`;
+        throw new Error(`Urządzenie powiązane z tym audytem nie zostało znalezione${syncInfo}. Spróbuj zsynchronizować dane.`);
+      }
+      
       const formConfig = await getFullFormConfig(session.projectId);
       const answersMap = await getAnswersMap(session.localId);
       

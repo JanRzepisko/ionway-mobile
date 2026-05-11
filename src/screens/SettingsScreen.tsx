@@ -36,7 +36,7 @@ export function SettingsScreen() {
     checkOnlineStatus,
   } = useProjectStore();
   
-  const { settings, loadSettings, setDeveloperMode, setLocalApiUrl } = useSettingsStore();
+  const { settings, loadSettings, setDeveloperMode, setLocalApiUrl, setBackgroundSyncEnabled } = useSettingsStore();
   
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [showDevSettings, setShowDevSettings] = useState(false);
@@ -331,6 +331,27 @@ export function SettingsScreen() {
               </Text>
             </View>
           )}
+        </Card>
+
+        {/* Background Sync Setting */}
+        <Card variant="outlined" style={styles.infoCard}>
+          <View style={styles.settingRow}>
+            <View style={styles.settingInfo}>
+              <View style={styles.settingHeader}>
+                <Icon name="sync-circle" size={24} color={colors.primary} />
+                <Text style={styles.infoTitle}>Auto-synchronizacja</Text>
+              </View>
+              <Text style={styles.settingDescription}>
+                Automatycznie wysyłaj audyty gdy jest połączenie z serwerem
+              </Text>
+            </View>
+            <Switch
+              value={settings.backgroundSyncEnabled}
+              onValueChange={setBackgroundSyncEnabled}
+              trackColor={{ false: colors.outline, true: colors.primary }}
+              thumbColor={settings.backgroundSyncEnabled ? colors.primaryForeground : colors.surface}
+            />
+          </View>
         </Card>
 
         <Card variant="outlined" style={styles.infoCard}>
@@ -633,6 +654,27 @@ const styles = StyleSheet.create({
   },
   logoutButton: {
     marginTop: spacing.lg,
+  },
+  // Settings row
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  settingInfo: {
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  settingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  settingDescription: {
+    ...typography.bodySmall,
+    color: colors.textSecondary,
+    marginLeft: 32, // Icon width + gap
   },
   // Developer Mode
   devCard: {

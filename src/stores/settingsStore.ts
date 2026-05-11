@@ -10,6 +10,7 @@ const SETTINGS_KEY = 'audix_settings';
 interface Settings {
   developerMode: boolean;
   localApiUrl: string;
+  backgroundSyncEnabled: boolean;
 }
 
 interface SettingsState {
@@ -18,11 +19,13 @@ interface SettingsState {
   loadSettings: () => Promise<void>;
   setDeveloperMode: (enabled: boolean) => Promise<void>;
   setLocalApiUrl: (url: string) => Promise<void>;
+  setBackgroundSyncEnabled: (enabled: boolean) => Promise<void>;
 }
 
 const defaultSettings: Settings = {
   developerMode: false,
   localApiUrl: 'http://localhost:5004/api',
+  backgroundSyncEnabled: true, // Enabled by default
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -52,6 +55,12 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   setLocalApiUrl: async (url: string) => {
     const newSettings = { ...get().settings, localApiUrl: url };
+    set({ settings: newSettings });
+    await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(newSettings));
+  },
+
+  setBackgroundSyncEnabled: async (enabled: boolean) => {
+    const newSettings = { ...get().settings, backgroundSyncEnabled: enabled };
     set({ settings: newSettings });
     await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(newSettings));
   },

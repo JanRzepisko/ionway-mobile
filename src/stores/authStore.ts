@@ -27,7 +27,7 @@ interface AuthState {
 
 const USER_STORAGE_KEY = 'audix_user';
 const LAST_AUTH_KEY = 'audix_last_auth';
-const OFFLINE_SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+const OFFLINE_SESSION_MAX_AGE = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,

@@ -465,6 +465,40 @@ export async function createDeviceOffline(
 }
 
 /**
+ * Preview next znacznik for a user (without incrementing counter).
+ * Used to show what znacznik will be assigned before creating device.
+ */
+export async function getNextZnacznikPreview(
+  userId: string,
+  firstName: string,
+  lastName: string
+): Promise<string> {
+  const db = await getDatabase();
+  
+  // Get current counter for this user (don't increment)
+  const existing = await db.getFirstAsync<{ counter: number }>(
+    'SELECT counter FROM znacznik_counters WHERE user_id = ?',
+    [userId]
+  );
+  
+  const nextCounter = (existing?.counter ?? 0) + 1;
+  
+  // Format: Z00001
+  const counterPart = 'Z' + nextCounter.toString().padStart(5, '0');
+  
+  // Get initials (first letter of first name + first letter of last name)
+  const initials = (
+    (firstName?.charAt(0) || 'X') + 
+    (lastName?.charAt(0) || 'X')
+  ).toUpperCase();
+  
+  // Get last 2 characters of user GUID
+  const guidSuffix = userId.slice(-2).toLowerCase();
+  
+  return counterPart + initials + guidSuffix;
+}
+
+/**
  * Generate auto-marker (znacznik) for new devices.
  * Format: Z00001JK0b
  * - Z + 5-digit counter (per user)
@@ -563,9 +597,10 @@ export async function updateDeviceSyncStatus(
 export async function getPendingDevices(projectId: string): Promise<Device[]> {
   const db = await getDatabase();
   
+  // Include 'uploading' status - these are stuck uploads that need retry
   const rows = await db.getAllAsync<DeviceRow>(
     `SELECT * FROM devices 
-     WHERE project_id = ? AND sync_status IN ('local_only', 'pending_upload', 'upload_error')
+     WHERE project_id = ? AND sync_status IN ('local_only', 'pending_upload', 'upload_error', 'uploading')
      ORDER BY created_at`,
     [projectId]
   );
@@ -582,6 +617,27 @@ export async function getDeviceCount(projectId: string): Promise<number> {
   );
 
   return result?.count ?? 0;
+}
+
+/**
+ * Fix stuck devices that have 'uploading' status
+ * These are devices where upload was interrupted and status wasn't reverted
+ */
+export async function fixStuckUploadingDevices(projectId: string): Promise<number> {
+  const db = await getDatabase();
+  
+  const result = await db.runAsync(
+    `UPDATE devices 
+     SET sync_status = 'pending_upload'
+     WHERE project_id = ? AND sync_status = 'uploading'`,
+    [projectId]
+  );
+  
+  if (result.changes > 0) {
+    console.log(`[DB] Fixed ${result.changes} stuck uploading devices`);
+  }
+  
+  return result.changes;
 }
 
 // -----------------------------------------------------------------------------

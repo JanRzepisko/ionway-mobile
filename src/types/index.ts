@@ -372,7 +372,7 @@ export interface MobileAuditSession {
   mobileLocalId: string;
   deviceId?: string;
   deviceMobileLocalId?: string;
-  status: string;
+  status: string; // Server expects C# enum names: Draft, InProgress, Completed, Cancelled
   startedAt: string;
   completedAt?: string;
   notes?: string;

@@ -30,6 +30,11 @@ import {
   isOnline,
   getSyncStatus
 } from '../services/syncService';
+import { 
+  startBackgroundSync, 
+  stopBackgroundSync,
+  setBackgroundSyncProject 
+} from '../services/backgroundSync';
 import { getProjects as apiGetProjects } from '../services/api';
 import { getPendingAuditSessions } from '../database/audits';
 import { flushPendingWrites } from './auditStore';
@@ -201,6 +206,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   
   // Clear current project selection
   clearCurrentProject: async () => {
+    // Stop background sync
+    stopBackgroundSync();
+    
     await SecureStore.deleteItemAsync(SELECTED_PROJECT_KEY);
     set({ 
       currentProject: null, 
@@ -231,6 +239,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         // Load devices and filters
         await get().loadDevices();
         await get().updateSyncStatus();
+        
+        // Start background sync for this project
+        startBackgroundSync(projectId);
       } else {
         set({ 
           error: 'Projekt nie znaleziony',
@@ -255,6 +266,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           set({ currentProject: project, filters: {} });
           await get().loadDevices();
           await get().updateSyncStatus();
+          
+          // Start background sync for this project
+          startBackgroundSync(projectId);
         }
       }
     } catch (error) {

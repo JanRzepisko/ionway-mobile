@@ -40,7 +40,9 @@ export {
   createDeviceOffline,
   updateDeviceSyncStatus,
   getPendingDevices,
-  getDeviceCount
+  getDeviceCount,
+  getNextZnacznikPreview,
+  fixStuckUploadingDevices
 } from './devices';
 export type { PaginatedDevicesResult } from './devices';
 
@@ -83,6 +85,8 @@ export {
   completeAuditSession,
   updateAuditSessionSyncStatus,
   getPendingAuditSessions,
+  fixStuckUploadingSessions,
+  deleteLocalAuditSession,
   saveAuditAnswer,
   upsertAnswer,
   getAnswersBySession,

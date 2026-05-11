@@ -11,7 +11,9 @@ import {
   RefreshControl,
   TextInput,
   Alert,
+  Animated,
 } from 'react-native';
+import { Swipeable } from 'react-native-gesture-handler';
 import { Text, ActivityIndicator } from 'react-native-paper';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { useNavigation, useFocusEffect, useScrollToTop } from '@react-navigation/native';
@@ -21,7 +23,7 @@ import { colors, spacing, typography, borderRadius, shadows } from '../theme';
 import { useProjectStore } from '../stores/projectStore';
 import { useAuditStore } from '../stores/auditStore';
 import { AuditSession } from '../types';
-import { getAllAuditSessions, getDeviceById } from '../database';
+import { getAllAuditSessions, getDeviceById, fixStuckUploadingSessions, fixStuckUploadingDevices, deleteLocalAuditSession } from '../database';
 
 type FilterStatus = 'all' | 'completed' | 'in_progress' | 'pending' | 'synced';
 
@@ -57,6 +59,12 @@ export function MyAuditsScreen() {
     if (!currentProject) return;
     
     try {
+      // Fix any stuck "uploading" sessions and devices first
+      await Promise.all([
+        fixStuckUploadingSessions(currentProject.id),
+        fixStuckUploadingDevices(currentProject.id),
+      ]);
+      
       const allSessions = await getAllAuditSessions(currentProject.id);
       setSessions(allSessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)));
       
@@ -120,7 +128,7 @@ export function MyAuditsScreen() {
           case 'in_progress':
             return s.status === 'in_progress';
           case 'pending':
-            return s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only';
+            return s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only' || s.syncStatus === 'uploading';
           case 'synced':
             return s.syncStatus === 'synced';
           default:
@@ -161,7 +169,8 @@ export function MyAuditsScreen() {
   const getStatusText = (session: AuditSession) => {
     if (session.status === 'completed') {
       if (session.syncStatus === 'synced') return 'Wysłany';
-      if (session.syncStatus === 'pending_upload') return 'Do wysłania';
+      if (session.syncStatus === 'pending_upload' || session.syncStatus === 'local_only' || session.syncStatus === 'uploading') return 'Do wysłania';
+      if (session.syncStatus === 'upload_error') return 'Błąd wysyłania';
       return 'Zakończony';
     }
     return 'W trakcie';
@@ -179,6 +188,63 @@ export function MyAuditsScreen() {
     });
   };
 
+  // Check if session can be deleted (only local/not synced sessions)
+  const canDelete = (session: AuditSession) => {
+    return session.syncStatus !== 'synced';
+  };
+
+  // Handle delete session
+  const handleDeleteSession = async (session: AuditSession) => {
+    if (!canDelete(session)) {
+      Alert.alert('Nie można usunąć', 'Zsynchronizowane audyty nie mogą być usunięte.');
+      return;
+    }
+
+    Alert.alert(
+      'Usuń audyt',
+      'Czy na pewno chcesz usunąć ten audyt? Ta operacja jest nieodwracalna.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń',
+          style: 'destructive',
+          onPress: async () => {
+            const deleted = await deleteLocalAuditSession(session.localId);
+            if (deleted) {
+              // Remove from local state
+              setSessions(prev => prev.filter(s => s.localId !== session.localId));
+            } else {
+              Alert.alert('Błąd', 'Nie udało się usunąć audytu.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  // Render delete action for swipeable
+  const renderRightActions = (session: AuditSession, progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
+    if (!canDelete(session)) return null;
+
+    const trans = dragX.interpolate({
+      inputRange: [-100, 0],
+      outputRange: [0, 100],
+      extrapolate: 'clamp',
+    });
+
+    return (
+      <Animated.View style={[styles.deleteAction, { transform: [{ translateX: trans }] }]}>
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={() => handleDeleteSession(session)}
+        >
+          <Icon name="delete" size={24} color={colors.surface} />
+          <Text style={styles.deleteText}>Usuń</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    );
+  };
+
   const filters: { key: FilterStatus; label: string; icon: string }[] = [
     { key: 'all', label: 'Wszystkie', icon: 'format-list-bulleted' },
     { key: 'completed', label: 'Zakończone', icon: 'check-circle' },
@@ -192,7 +258,7 @@ export function MyAuditsScreen() {
       all: sessions.length,
       completed: sessions.filter(s => s.status === 'completed').length,
       in_progress: sessions.filter(s => s.status === 'in_progress').length,
-      pending: sessions.filter(s => s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only').length,
+      pending: sessions.filter(s => s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only' || s.syncStatus === 'uploading').length,
       synced: sessions.filter(s => s.syncStatus === 'synced').length,
     };
   };
@@ -288,8 +354,9 @@ export function MyAuditsScreen() {
         renderItem={({ item }) => {
           const statusColor = getStatusColor(item);
           const deviceName = deviceNames[item.deviceId] || item.deviceId;
+          const isDeletable = canDelete(item);
           
-          return (
+          const cardContent = (
             <TouchableOpacity 
               style={styles.sessionCard}
               onPress={() => navigation.navigate('AuditForm', { 
@@ -317,6 +384,12 @@ export function MyAuditsScreen() {
                     <Icon name="calendar" size={14} color={colors.textSecondary} />
                     <Text style={styles.metaText}>{formatDate(item.startedAt)}</Text>
                   </View>
+                  {isDeletable && (
+                    <View style={styles.metaItem}>
+                      <Icon name="gesture-swipe-left" size={14} color={colors.textDisabled} />
+                      <Text style={[styles.metaText, { color: colors.textDisabled }]}>przesuń aby usunąć</Text>
+                    </View>
+                  )}
                 </View>
 
                 {item.completedAt && (
@@ -332,6 +405,20 @@ export function MyAuditsScreen() {
               <Icon name="chevron-right" size={24} color={colors.textDisabled} />
             </TouchableOpacity>
           );
+          
+          // Wrap in Swipeable only if can be deleted
+          if (isDeletable) {
+            return (
+              <Swipeable
+                renderRightActions={(progress, dragX) => renderRightActions(item, progress, dragX)}
+                overshootRight={false}
+              >
+                {cardContent}
+              </Swipeable>
+            );
+          }
+          
+          return cardContent;
         }}
       />
     </View>
@@ -511,5 +598,25 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: spacing.xs,
     textAlign: 'center',
+  },
+  deleteAction: {
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    marginBottom: spacing.sm,
+    borderRadius: borderRadius.lg,
+  },
+  deleteButton: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 80,
+    height: '100%',
+    paddingHorizontal: spacing.md,
+  },
+  deleteText: {
+    ...typography.labelSmall,
+    color: colors.surface,
+    fontWeight: '600',
+    marginTop: spacing.xs,
   },
 });

@@ -23,6 +23,7 @@ import {
   getDistinctGroups,
   getDistinctTypes,
   getDistinctDrawingNumbers,
+  getNextZnacznikPreview,
 } from '../database/devices';
 
 type RootStackParamList = {
@@ -40,8 +41,6 @@ interface FormData {
   group: string;
   type: string;
   drawingNumber: string;
-  routeNumber: string;
-  disciplineCode: string;
 }
 
 interface SuggestionModalProps {
@@ -306,12 +305,20 @@ export function AddDeviceScreen() {
     group: '',
     type: '',
     drawingNumber: '',
-    routeNumber: '',
-    disciplineCode: '',
   });
   
   const [errors, setErrors] = useState<Partial<FormData>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [nextZnacznik, setNextZnacznik] = useState<string>('');
+
+  // Load next znacznik preview
+  useEffect(() => {
+    if (user) {
+      getNextZnacznikPreview(user.id, user.firstName, user.lastName)
+        .then(setNextZnacznik)
+        .catch(console.error);
+    }
+  }, [user?.id]);
 
   // Cascading filter options
   const [buildings, setBuildings] = useState<string[]>([]);
@@ -330,11 +337,12 @@ export function AddDeviceScreen() {
   }, [currentProject?.id]);
 
   // Update cascading options when form data changes
+  // Reload levels/zones when building/level changes (they are still cascading)
   useEffect(() => {
     if (currentProject) {
       loadCascadingOptions();
     }
-  }, [formData.building, formData.level, formData.zone, formData.system, formData.group, formData.type]);
+  }, [formData.building, formData.level]);
 
   const loadOptions = async () => {
     if (!currentProject) return;
@@ -357,7 +365,7 @@ export function AddDeviceScreen() {
     const group = formData.group || undefined;
     const type = formData.type || undefined;
 
-    // Load all options in parallel - always show available options, filtered by parent selections
+    // Load all options in parallel - show ALL available options when adding (no filtering)
     const [l, z, s, g, t, dn] = await Promise.all([
       // Levels - filter by building if selected, otherwise all
       getDistinctLevels(currentProject.id, building),
@@ -365,17 +373,17 @@ export function AddDeviceScreen() {
       // Zones - filter by building and/or level if selected
       getDistinctZones(currentProject.id, building, level),
       
-      // Systems - filter by selections above
-      getDistinctSystems(currentProject.id, building, level, zone),
+      // Systems - ALL systems available (no filtering when adding)
+      getDistinctSystems(currentProject.id, undefined, undefined, undefined),
       
-      // Groups - filter by selections above
-      getDistinctGroups(currentProject.id, { building, level, zone, system }),
+      // Groups - ALL groups available (no filtering when adding)
+      getDistinctGroups(currentProject.id, {}),
       
-      // Types - filter by selections above
-      getDistinctTypes(currentProject.id, { building, level, zone, system, group }),
+      // Types - ALL types available (no filtering when adding)
+      getDistinctTypes(currentProject.id, {}),
       
-      // Drawing numbers - filter by all selected fields
-      getDistinctDrawingNumbers(currentProject.id, { building, level, zone, system, group, type }),
+      // Drawing numbers - ALL drawing numbers (no filtering when adding)
+      getDistinctDrawingNumbers(currentProject.id, {}),
     ]);
 
     setLevels(l);
@@ -485,8 +493,6 @@ export function AddDeviceScreen() {
           group: formData.group.trim() || undefined,
           type: formData.type.trim() || undefined,
           drawingNumber: formData.drawingNumber.trim() || undefined,
-          routeNumber: formData.routeNumber.trim() || undefined,
-          disciplineCode: formData.disciplineCode.trim() || undefined,
         },
         user.id,
         user.firstName,
@@ -549,6 +555,19 @@ export function AddDeviceScreen() {
         </View>
       </View>
 
+      {/* Znacznik - prominent display */}
+      {nextZnacznik && (
+        <View style={styles.znacznikCard}>
+          <View style={styles.znacznikIconContainer}>
+            <Icon name="tag" size={28} color={colors.primaryForeground} />
+          </View>
+          <View style={styles.znacznikContent}>
+            <Text style={styles.znacznikCardLabel}>NUMER ZNACZNIKA</Text>
+            <Text style={styles.znacznikCardValue}>{nextZnacznik}</Text>
+          </View>
+        </View>
+      )}
+
       <View style={styles.infoBanner}>
         <Icon name="information-outline" size={20} color={colors.info} />
         <Text style={styles.infoBannerText}>
@@ -586,6 +605,7 @@ export function AddDeviceScreen() {
           options={types}
           onChange={(v) => updateField('type', v)}
           helperText={types.length > 0 ? `${types.length} dostępnych typów` : undefined}
+          allowCustom={false}
         />
       </Card>
 
@@ -638,6 +658,7 @@ export function AddDeviceScreen() {
           value={formData.group}
           options={groups}
           onChange={(v) => updateField('group', v)}
+          allowCustom={false}
         />
       </Card>
 
@@ -656,30 +677,6 @@ export function AddDeviceScreen() {
           onChange={(v) => updateField('drawingNumber', v)}
           allowCustom={false}
         />
-        
-        <View style={styles.field}>
-          <TextInput
-            mode="outlined"
-            label="Numer trasy"
-            value={formData.routeNumber}
-            onChangeText={(v) => updateField('routeNumber', v)}
-            style={styles.input}
-            outlineColor={colors.outline}
-            activeOutlineColor={colors.primary}
-          />
-        </View>
-        
-        <View style={styles.field}>
-          <TextInput
-            mode="outlined"
-            label="Oznaczenie branżowe"
-            value={formData.disciplineCode}
-            onChangeText={(v) => updateField('disciplineCode', v)}
-            style={styles.input}
-            outlineColor={colors.outline}
-            activeOutlineColor={colors.primary}
-          />
-        </View>
       </Card>
 
       {/* Actions */}
@@ -780,6 +777,40 @@ const styles = StyleSheet.create({
     ...typography.bodyMedium,
     color: colors.textSecondary,
     marginBottom: spacing.lg,
+  },
+  znacznikCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+    padding: spacing.lg,
+    borderRadius: borderRadius.lg,
+    gap: spacing.md,
+    ...shadows.md,
+  },
+  znacznikIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: borderRadius.lg,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  znacznikContent: {
+    flex: 1,
+  },
+  znacznikCardLabel: {
+    ...typography.labelSmall,
+    color: 'rgba(255,255,255,0.8)',
+    letterSpacing: 1.5,
+    marginBottom: 4,
+  },
+  znacznikCardValue: {
+    ...typography.headlineLarge,
+    color: colors.primaryForeground,
+    fontWeight: '700',
+    letterSpacing: 2,
   },
   field: {
     marginBottom: spacing.md,

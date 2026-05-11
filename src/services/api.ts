@@ -256,12 +256,36 @@ export async function uploadProjectData(
 ): Promise<MobileUploadResponse> {
   // Use longer timeout for uploads - get auth token manually
   const token = await getAccessToken();
-  const response = await apiUpload.post(
-    `/mobile/projects/${projectId}/upload`, 
-    request,
-    { headers: token ? { Authorization: `Bearer ${token}` } : {} }
-  );
-  return response.data.data;
+  
+  console.log('[API] Upload request:', JSON.stringify({
+    projectId: request.projectId,
+    mobileDeviceId: request.mobileDeviceId,
+    newDevicesCount: request.newDevices.length,
+    auditSessionsCount: request.auditSessions.length,
+    firstSession: request.auditSessions[0] ? {
+      mobileLocalId: request.auditSessions[0].mobileLocalId,
+      deviceId: request.auditSessions[0].deviceId,
+      status: request.auditSessions[0].status,
+      answersCount: request.auditSessions[0].answers.length,
+    } : null,
+  }, null, 2));
+  
+  try {
+    const response = await apiUpload.post(
+      `/mobile/projects/${projectId}/upload`, 
+      request,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+    return response.data.data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response) {
+      console.error('[API] Upload error response:', {
+        status: error.response.status,
+        data: error.response.data,
+      });
+    }
+    throw error;
+  }
 }
 
 // -----------------------------------------------------------------------------

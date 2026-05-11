@@ -157,14 +157,36 @@ export async function updateAuditSessionSyncStatus(
 export async function getPendingAuditSessions(projectId: string): Promise<AuditSession[]> {
   const db = await getDatabase();
   
+  // Include 'uploading' status as pending - these are stuck uploads that need retry
   const rows = await db.getAllAsync<AuditSessionRow>(
     `SELECT * FROM audit_sessions 
-     WHERE project_id = ? AND sync_status IN ('local_only', 'pending_upload', 'upload_error')
+     WHERE project_id = ? AND sync_status IN ('local_only', 'pending_upload', 'upload_error', 'uploading')
      ORDER BY started_at`,
     [projectId]
   );
 
   return rows.map(mapRowToAuditSession);
+}
+
+/**
+ * Fix stuck audit sessions that have 'uploading' status
+ * These are sessions where upload was interrupted and status wasn't reverted
+ */
+export async function fixStuckUploadingSessions(projectId: string): Promise<number> {
+  const db = await getDatabase();
+  
+  const result = await db.runAsync(
+    `UPDATE audit_sessions 
+     SET sync_status = 'pending_upload'
+     WHERE project_id = ? AND sync_status = 'uploading'`,
+    [projectId]
+  );
+  
+  if (result.changes > 0) {
+    console.log(`[DB] Fixed ${result.changes} stuck uploading sessions`);
+  }
+  
+  return result.changes;
 }
 
 // -----------------------------------------------------------------------------
@@ -351,6 +373,45 @@ export async function getPendingAnswersForSession(
   );
 
   return rows.map(mapRowToAuditAnswer);
+}
+
+// -----------------------------------------------------------------------------
+// Delete local audit session (only if not synced)
+// -----------------------------------------------------------------------------
+
+export async function deleteLocalAuditSession(localId: string): Promise<boolean> {
+  const db = await getDatabase();
+  
+  // First check if the session is synced - don't allow deletion of synced sessions
+  const session = await db.getFirstAsync<{ sync_status: string }>(
+    'SELECT sync_status FROM audit_sessions WHERE local_id = ?',
+    [localId]
+  );
+  
+  if (!session) {
+    console.log(`[DB] Session ${localId} not found`);
+    return false;
+  }
+  
+  if (session.sync_status === 'synced') {
+    console.log(`[DB] Cannot delete synced session ${localId}`);
+    return false;
+  }
+  
+  // Delete answers first (foreign key constraint)
+  await db.runAsync(
+    'DELETE FROM audit_answers WHERE audit_session_local_id = ?',
+    [localId]
+  );
+  
+  // Delete the session
+  const result = await db.runAsync(
+    'DELETE FROM audit_sessions WHERE local_id = ?',
+    [localId]
+  );
+  
+  console.log(`[DB] Deleted local audit session ${localId} with ${result.changes} rows affected`);
+  return result.changes > 0;
 }
 
 // -----------------------------------------------------------------------------

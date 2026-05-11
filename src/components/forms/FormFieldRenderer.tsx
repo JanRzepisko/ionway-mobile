@@ -81,40 +81,40 @@ export function FormFieldRenderer({
     switch (field.fieldType) {
       case 'text':
         return shouldBeMultiline 
-          ? <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />
-          : <TextField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+          ? <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />
+          : <TextField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'textArea':
-        return <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'number':
-        return <NumberField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <NumberField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'select':
-        return <SelectField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <SelectField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'radio':
-        return <RadioField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <RadioField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'checkbox':
-        return <CheckboxField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <CheckboxField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'slider':
-        return <SliderField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <SliderField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'extendedList':
-        return <SearchableSelectField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <SearchableSelectField field={field} options={options} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       case 'readonlyInfo':
         return <ReadonlyInfoField field={field} />;
       
       case 'date':
-        return <DateField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+        return <DateField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
       
       default:
         return shouldBeMultiline 
-          ? <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />
-          : <TextField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} />;
+          ? <TextAreaField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />
+          : <TextField field={field} value={value} onChange={effectiveOnChange} hasError={hasError} readonly={readonly} />;
     }
   };
 
@@ -134,7 +134,7 @@ export function FormFieldRenderer({
           )}
         </View>
         
-        {onCommentChange && field.fieldType !== 'readonlyInfo' && (
+        {onCommentChange && field.fieldType !== 'readonlyInfo' && !readonly && (
           <TouchableOpacity 
             onPress={() => setShowComment(!showComment)}
             style={styles.commentToggle}
@@ -162,27 +162,29 @@ export function FormFieldRenderer({
       </View>
       
       {/* Validation Error */}
-      {hasError && (
+      {hasError && !readonly && (
         <View style={styles.errorContainer}>
           <Icon name="alert-circle" size={14} color={colors.error} />
           <Text style={styles.errorText}>To pole jest wymagane</Text>
         </View>
       )}
       
-      {/* Comment */}
-      {showComment && onCommentChange && (
+      {/* Comment - show in readonly only if there's a comment */}
+      {((showComment && onCommentChange) || (readonly && comment)) && (
         <View style={styles.commentContainer}>
           <TextInput
             mode="outlined"
             label="Komentarz / Uwagi"
             value={comment || ''}
-            onChangeText={onCommentChange}
+            onChangeText={readonly ? () => {} : onCommentChange!}
             multiline
             numberOfLines={2}
-            style={styles.commentInput}
+            style={[styles.commentInput, readonly && styles.readonlyInput]}
             outlineColor={colors.outline}
             activeOutlineColor={colors.primary}
-            placeholder="Dodaj komentarz do odpowiedzi..."
+            placeholder={readonly ? '' : 'Dodaj komentarz do odpowiedzi...'}
+            disabled={readonly}
+            editable={!readonly}
           />
         </View>
       )}
@@ -199,61 +201,68 @@ interface FieldProps {
   value: string | null;
   onChange: (v: string | null) => void;
   hasError?: boolean;
+  readonly?: boolean;
 }
 
 interface OptionsFieldProps extends FieldProps {
   options: OptionValue[];
 }
 
-function TextField({ field, value, onChange, hasError }: FieldProps) {
+function TextField({ field, value, onChange, hasError, readonly }: FieldProps) {
   return (
     <TextInput
       mode="outlined"
       value={value || ''}
       onChangeText={(text) => onChange(text || null)}
-      placeholder={`Wprowadź ${field.label.toLowerCase()}`}
-      style={styles.textInput}
-      outlineColor={hasError ? colors.error : colors.outline}
+      placeholder={readonly ? '' : `Wprowadź ${field.label.toLowerCase()}`}
+      style={[styles.textInput, readonly && styles.readonlyInput]}
+      outlineColor={hasError ? colors.error : readonly ? colors.outline : colors.outline}
       activeOutlineColor={hasError ? colors.error : colors.primary}
       error={hasError}
+      disabled={readonly}
+      editable={!readonly}
     />
   );
 }
 
-function TextAreaField({ field, value, onChange, hasError }: FieldProps) {
+function TextAreaField({ field, value, onChange, hasError, readonly }: FieldProps) {
   return (
     <TextInput
       mode="outlined"
       value={value || ''}
       onChangeText={(text) => onChange(text || null)}
-      placeholder={`Wprowadź ${field.label.toLowerCase()}`}
+      placeholder={readonly ? '' : `Wprowadź ${field.label.toLowerCase()}`}
       multiline
       numberOfLines={4}
-      style={[styles.textInput, styles.textArea]}
+      style={[styles.textInput, styles.textArea, readonly && styles.readonlyInput]}
       outlineColor={hasError ? colors.error : colors.outline}
       activeOutlineColor={hasError ? colors.error : colors.primary}
       error={hasError}
+      disabled={readonly}
+      editable={!readonly}
     />
   );
 }
 
-function NumberField({ field, value, onChange, hasError }: FieldProps) {
+function NumberField({ field, value, onChange, hasError, readonly }: FieldProps) {
   return (
     <TextInput
       mode="outlined"
       value={value || ''}
       onChangeText={(text) => onChange(text || null)}
       keyboardType="numeric"
-      placeholder="0"
-      style={styles.textInput}
+      placeholder={readonly ? '' : '0'}
+      style={[styles.textInput, readonly && styles.readonlyInput]}
       outlineColor={hasError ? colors.error : colors.outline}
       activeOutlineColor={hasError ? colors.error : colors.primary}
       error={hasError}
+      disabled={readonly}
+      editable={!readonly}
     />
   );
 }
 
-function DateField({ field, value, onChange, hasError }: FieldProps) {
+function DateField({ field, value, onChange, hasError, readonly }: FieldProps) {
   const [showPicker, setShowPicker] = useState(false);
   
   // Parse value to Date object
@@ -305,23 +314,26 @@ function DateField({ field, value, onChange, hasError }: FieldProps) {
   };
 
   return (
-    <View>
+    <View pointerEvents={readonly ? 'none' : 'auto'}>
       <TouchableOpacity
         style={[
           styles.datePickerButton,
-          hasError && styles.datePickerButtonError
+          hasError && styles.datePickerButtonError,
+          readonly && styles.readonlyField
         ]}
-        onPress={() => setShowPicker(true)}
-        activeOpacity={0.7}
+        onPress={() => !readonly && setShowPicker(true)}
+        activeOpacity={readonly ? 1 : 0.7}
+        disabled={readonly}
       >
-        <Icon name="calendar" size={24} color={colors.primary} />
+        <Icon name="calendar" size={24} color={readonly ? colors.textDisabled : colors.primary} />
         <Text style={[
           styles.datePickerValue,
-          !value && styles.datePickerPlaceholder
+          !value && styles.datePickerPlaceholder,
+          readonly && styles.readonlyFieldText
         ]}>
-          {displayValue || 'Wybierz datę...'}
+          {displayValue || (readonly ? '-' : 'Wybierz datę...')}
         </Text>
-        {value && (
+        {value && !readonly && (
           <TouchableOpacity
             onPress={() => onChange(null)}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -368,23 +380,26 @@ function DateField({ field, value, onChange, hasError }: FieldProps) {
   );
 }
 
-function SelectField({ field, options, value, onChange, hasError }: OptionsFieldProps) {
+function SelectField({ field, options, value, onChange, hasError, readonly }: OptionsFieldProps) {
   if (options.length <= 5) {
     return (
-      <View style={[styles.selectContainer, hasError && styles.selectContainerError]}>
+      <View style={[styles.selectContainer, hasError && styles.selectContainerError, readonly && styles.readonlyField]} pointerEvents={readonly ? 'none' : 'auto'}>
         {options.map((option) => (
           <TouchableOpacity
             key={option.id}
             style={[
               styles.selectChip,
-              value === option.value && styles.selectChipSelected
+              value === option.value && styles.selectChipSelected,
+              readonly && value !== option.value && styles.readonlyChipUnselected
             ]}
-            onPress={() => onChange(value === option.value ? null : option.value)}
-            activeOpacity={0.7}
+            onPress={() => !readonly && onChange(value === option.value ? null : option.value)}
+            activeOpacity={readonly ? 1 : 0.7}
+            disabled={readonly}
           >
             <Text style={[
               styles.selectChipText,
-              value === option.value && styles.selectChipTextSelected
+              value === option.value && styles.selectChipTextSelected,
+              readonly && value !== option.value && styles.readonlyChipTextUnselected
             ]}>
               {option.label}
             </Text>
@@ -395,13 +410,13 @@ function SelectField({ field, options, value, onChange, hasError }: OptionsField
   }
 
   return (
-    <SearchableSelectField field={field} options={options} value={value} onChange={onChange} hasError={hasError} />
+    <SearchableSelectField field={field} options={options} value={value} onChange={onChange} hasError={hasError} readonly={readonly} />
   );
 }
 
-function RadioField({ field, options, value, onChange, hasError }: OptionsFieldProps) {
+function RadioField({ field, options, value, onChange, hasError, readonly }: OptionsFieldProps) {
   return (
-    <View style={[styles.radioContainer, hasError && styles.radioContainerError]}>
+    <View style={[styles.radioContainer, hasError && styles.radioContainerError, readonly && styles.readonlyField]} pointerEvents={readonly ? 'none' : 'auto'}>
       {options.map((option) => {
         const isSelected = value === option.value;
         return (
@@ -409,20 +424,24 @@ function RadioField({ field, options, value, onChange, hasError }: OptionsFieldP
             key={option.id}
             style={[
               styles.radioItem,
-              isSelected && styles.radioItemSelected
+              isSelected && styles.radioItemSelected,
+              readonly && !isSelected && styles.readonlyItemUnselected
             ]}
-            onPress={() => onChange(option.value)}
-            activeOpacity={0.7}
+            onPress={() => !readonly && onChange(option.value)}
+            activeOpacity={readonly ? 1 : 0.7}
+            disabled={readonly}
           >
             <View style={[
               styles.radioCircle,
-              isSelected && styles.radioCircleSelected
+              isSelected && styles.radioCircleSelected,
+              readonly && !isSelected && styles.readonlyCircle
             ]}>
               {isSelected && <View style={styles.radioCircleInner} />}
             </View>
             <Text style={[
               styles.radioLabel,
-              isSelected && styles.radioLabelSelected
+              isSelected && styles.radioLabelSelected,
+              readonly && !isSelected && styles.readonlyLabelUnselected
             ]}>
               {option.label}
             </Text>
@@ -433,12 +452,13 @@ function RadioField({ field, options, value, onChange, hasError }: OptionsFieldP
   );
 }
 
-function CheckboxField({ field, options, value, onChange, hasError }: OptionsFieldProps) {
+function CheckboxField({ field, options, value, onChange, hasError, readonly }: OptionsFieldProps) {
   const selectedValues = useMemo(() => {
     return value ? value.split(',').filter(Boolean) : [];
   }, [value]);
 
   const toggleValue = useCallback((optionValue: string) => {
+    if (readonly) return;
     let newValues: string[];
     if (selectedValues.includes(optionValue)) {
       newValues = selectedValues.filter(v => v !== optionValue);
@@ -446,7 +466,7 @@ function CheckboxField({ field, options, value, onChange, hasError }: OptionsFie
       newValues = [...selectedValues, optionValue];
     }
     onChange(newValues.length > 0 ? newValues.join(',') : null);
-  }, [selectedValues, onChange]);
+  }, [selectedValues, onChange, readonly]);
 
   // If no options, render as simple boolean checkbox
   if (options.length === 0) {
@@ -456,20 +476,24 @@ function CheckboxField({ field, options, value, onChange, hasError }: OptionsFie
         style={[
           styles.checkboxItem,
           isChecked && styles.checkboxItemSelected,
-          hasError && styles.checkboxItemError
+          hasError && styles.checkboxItemError,
+          readonly && styles.readonlyField
         ]}
-        onPress={() => onChange(isChecked ? null : 'true')}
-        activeOpacity={0.7}
+        onPress={() => !readonly && onChange(isChecked ? null : 'true')}
+        activeOpacity={readonly ? 1 : 0.7}
+        disabled={readonly}
       >
         <View style={[
           styles.checkboxBox,
-          isChecked && styles.checkboxBoxSelected
+          isChecked && styles.checkboxBoxSelected,
+          readonly && !isChecked && styles.readonlyCheckbox
         ]}>
           {isChecked && <Icon name="check" size={16} color={colors.primaryForeground} />}
         </View>
         <Text style={[
           styles.checkboxLabel,
-          isChecked && styles.checkboxLabelSelected
+          isChecked && styles.checkboxLabelSelected,
+          readonly && !isChecked && styles.readonlyLabelUnselected
         ]}>
           Tak
         </Text>
@@ -478,7 +502,7 @@ function CheckboxField({ field, options, value, onChange, hasError }: OptionsFie
   }
 
   return (
-    <View style={[styles.checkboxContainer, hasError && styles.checkboxContainerError]}>
+    <View style={[styles.checkboxContainer, hasError && styles.checkboxContainerError, readonly && styles.readonlyField]} pointerEvents={readonly ? 'none' : 'auto'}>
       {options.map((option) => {
         const isChecked = selectedValues.includes(option.value);
         return (
@@ -486,20 +510,24 @@ function CheckboxField({ field, options, value, onChange, hasError }: OptionsFie
             key={option.id}
             style={[
               styles.checkboxItem,
-              isChecked && styles.checkboxItemSelected
+              isChecked && styles.checkboxItemSelected,
+              readonly && !isChecked && styles.readonlyItemUnselected
             ]}
             onPress={() => toggleValue(option.value)}
-            activeOpacity={0.7}
+            activeOpacity={readonly ? 1 : 0.7}
+            disabled={readonly}
           >
             <View style={[
               styles.checkboxBox,
-              isChecked && styles.checkboxBoxSelected
+              isChecked && styles.checkboxBoxSelected,
+              readonly && !isChecked && styles.readonlyCheckbox
             ]}>
               {isChecked && <Icon name="check" size={16} color={colors.primaryForeground} />}
             </View>
             <Text style={[
               styles.checkboxLabel,
-              isChecked && styles.checkboxLabelSelected
+              isChecked && styles.checkboxLabelSelected,
+              readonly && !isChecked && styles.readonlyLabelUnselected
             ]}>
               {option.label}
             </Text>
@@ -510,14 +538,14 @@ function CheckboxField({ field, options, value, onChange, hasError }: OptionsFie
   );
 }
 
-function SliderField({ field, value, onChange, hasError }: FieldProps) {
+function SliderField({ field, value, onChange, hasError, readonly }: FieldProps) {
   const numValue = value ? parseInt(value, 10) : 0;
   const steps = [0, 25, 50, 75, 100];
   
   return (
-    <View style={[styles.sliderContainer, hasError && styles.sliderContainerError]}>
+    <View style={[styles.sliderContainer, hasError && styles.sliderContainerError, readonly && styles.readonlyField]} pointerEvents={readonly ? 'none' : 'auto'}>
       <View style={styles.sliderValueRow}>
-        <Text style={styles.sliderValue}>{numValue}%</Text>
+        <Text style={[styles.sliderValue, readonly && styles.readonlyFieldText]}>{numValue}%</Text>
       </View>
       <View style={styles.sliderButtons}>
         {steps.map((val) => {
@@ -527,14 +555,17 @@ function SliderField({ field, value, onChange, hasError }: FieldProps) {
               key={val}
               style={[
                 styles.sliderButton,
-                isActive && styles.sliderButtonActive
+                isActive && styles.sliderButtonActive,
+                readonly && !isActive && styles.readonlySliderButton
               ]}
-              onPress={() => onChange(val.toString())}
-              activeOpacity={0.7}
+              onPress={() => !readonly && onChange(val.toString())}
+              activeOpacity={readonly ? 1 : 0.7}
+              disabled={readonly}
             >
               <Text style={[
                 styles.sliderButtonText,
-                isActive && styles.sliderButtonTextActive
+                isActive && styles.sliderButtonTextActive,
+                readonly && !isActive && styles.readonlySliderButtonText
               ]}>
                 {val}%
               </Text>
@@ -546,7 +577,7 @@ function SliderField({ field, value, onChange, hasError }: FieldProps) {
   );
 }
 
-function SearchableSelectField({ field, options, value, onChange, hasError }: OptionsFieldProps) {
+function SearchableSelectField({ field, options, value, onChange, hasError, readonly }: OptionsFieldProps) {
   const [modalVisible, setModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -564,6 +595,7 @@ function SearchableSelectField({ field, options, value, onChange, hasError }: Op
   }, [options, value]);
 
   const handleSelect = (optionValue: string) => {
+    if (readonly) return;
     onChange(optionValue);
     setModalVisible(false);
     setSearchQuery('');
@@ -574,23 +606,27 @@ function SearchableSelectField({ field, options, value, onChange, hasError }: Op
       <TouchableOpacity
         style={[
           styles.searchSelectButton,
-          hasError && styles.searchSelectButtonError
+          hasError && styles.searchSelectButtonError,
+          readonly && styles.readonlyField
         ]}
-        onPress={() => setModalVisible(true)}
-        activeOpacity={0.7}
+        onPress={() => !readonly && setModalVisible(true)}
+        activeOpacity={readonly ? 1 : 0.7}
+        disabled={readonly}
       >
         <View style={styles.searchSelectContent}>
           {selectedOption ? (
-            <Text style={styles.searchSelectValue}>{selectedOption.label}</Text>
+            <Text style={[styles.searchSelectValue, readonly && styles.readonlyFieldText]}>{selectedOption.label}</Text>
           ) : (
-            <Text style={styles.searchSelectPlaceholder}>Wybierz z listy...</Text>
+            <Text style={styles.searchSelectPlaceholder}>{readonly ? '-' : 'Wybierz z listy...'}</Text>
           )}
         </View>
-        <Icon 
-          name="chevron-down" 
-          size={24} 
-          color={colors.textSecondary} 
-        />
+        {!readonly && (
+          <Icon 
+            name="chevron-down" 
+            size={24} 
+            color={colors.textSecondary} 
+          />
+        )}
       </TouchableOpacity>
 
       <Portal>
@@ -1043,7 +1079,7 @@ const styles = StyleSheet.create({
     color: colors.error,
   },
   
-  // Readonly
+  // Readonly info field
   readonlyContainer: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -1057,6 +1093,45 @@ const styles = StyleSheet.create({
     color: colors.infoDark,
     flex: 1,
     lineHeight: 24,
+  },
+  
+  // Readonly form fields (disabled state)
+  readonlyInput: {
+    backgroundColor: colors.surfaceVariant,
+  },
+  readonlyField: {
+    backgroundColor: colors.surfaceVariant,
+    opacity: 0.9,
+  },
+  readonlyFieldText: {
+    color: colors.textSecondary,
+  },
+  readonlyChipUnselected: {
+    opacity: 0.4,
+    borderColor: colors.outline,
+  },
+  readonlyChipTextUnselected: {
+    color: colors.textDisabled,
+  },
+  readonlyItemUnselected: {
+    opacity: 0.4,
+  },
+  readonlyCircle: {
+    borderColor: colors.textDisabled,
+  },
+  readonlyLabelUnselected: {
+    color: colors.textDisabled,
+  },
+  readonlyCheckbox: {
+    borderColor: colors.textDisabled,
+    backgroundColor: colors.surfaceVariant,
+  },
+  readonlySliderButton: {
+    opacity: 0.4,
+    borderColor: colors.outline,
+  },
+  readonlySliderButtonText: {
+    color: colors.textDisabled,
   },
 
   // Date Picker

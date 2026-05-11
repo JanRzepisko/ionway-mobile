@@ -43,8 +43,20 @@ import {
   MobileAuditAnswer,
   SyncStatus,
   TabType,
-  FieldType
+  FieldType,
+  AuditStatus
 } from '../types';
+
+// Map mobile status string to server enum name (C# enum: Draft, InProgress, Completed, Cancelled)
+function mapAuditStatusToServer(status: AuditStatus): string {
+  switch (status) {
+    case 'draft': return 'Draft';
+    case 'in_progress': return 'InProgress';
+    case 'completed': return 'Completed';
+    case 'cancelled': return 'Cancelled';
+    default: return 'InProgress';
+  }
+}
 
 // Mobile device ID (unique per installation)
 let mobileDeviceId: string | null = null;
@@ -364,25 +376,14 @@ export async function uploadProject(
     // Build upload request
     const deviceId = await getMobileDeviceId();
     
-    const newDevices: MobileNewDevice[] = pendingDevices.map(d => ({
-      mobileLocalId: d.localId,
-      elementId: d.elementId,
-      name: d.name,
-      znacznik: d.znacznik,
-      building: d.building,
-      level: d.level,
-      zone: d.zone,
-      system: d.system,
-      group: d.group,
-      type: d.type,
-      drawingNumber: d.drawingNumber,
-      routeNumber: d.routeNumber,
-      disciplineCode: d.disciplineCode,
-      createdAt: new Date(d.createdAt).toISOString(),
-      additionalDataJson: d.additionalDataJson,
-    }));
+    // Track all devices that need to be synced (from pendingDevices + any additional from sessions)
+    const devicesToSync = new Map<string, Device>();
+    for (const d of pendingDevices) {
+      devicesToSync.set(d.localId, d);
+    }
 
     const auditSessions: MobileAuditSession[] = [];
+    const skippedSessions: string[] = [];
     
     for (const session of pendingSessions) {
       const answers = await getAnswersBySession(session.localId);
@@ -397,22 +398,39 @@ export async function uploadProject(
         answeredAt: new Date(a.answeredAt).toISOString(),
       }));
 
-      // Get device - first check pending devices, then fetch from DB
-      let device = pendingDevices.find(d => d.localId === session.deviceLocalId);
+      // Get device - first check devices we're already syncing, then fetch from DB
+      let device = devicesToSync.get(session.deviceLocalId);
       
-      // If device is not in pending (already synced), fetch it from DB to get serverId
+      // If device is not in sync list, fetch it from DB
       if (!device) {
         device = await getDevice(session.deviceLocalId) ?? undefined;
       }
       
+      // Skip sessions where device is missing and can't be resolved
+      if (!device) {
+        console.warn(`[SYNC] Skipping session ${session.localId} - device ${session.deviceLocalId} not found in local DB`);
+        skippedSessions.push(session.localId);
+        await updateAuditSessionSyncStatus(session.localId, 'upload_error');
+        continue;
+      }
+      
       // Use device's serverId if available
-      const deviceServerId = device?.serverId;
-      const isNewDevice = device && !device.serverId;
+      const deviceServerId = device.serverId;
+      const isNewDevice = !device.serverId;
+      
+      // If device is new (no serverId) and not already in sync list, add it
+      // This handles the case where device was created locally but not in pendingDevices
+      if (isNewDevice && !devicesToSync.has(device.localId)) {
+        console.log(`[SYNC] Adding device ${device.localId} to sync list (needed for session ${session.localId})`);
+        devicesToSync.set(device.localId, device);
+        // Also update device status to pending_upload so it gets properly tracked
+        await updateDeviceSyncStatus(device.localId, 'pending_upload');
+      }
       
       console.log('[SYNC] Processing audit session:', {
         sessionLocalId: session.localId,
         deviceLocalId: session.deviceLocalId,
-        deviceFound: !!device,
+        deviceFound: true,
         deviceServerId,
         isNewDevice,
         answersCount: mobileAnswers.length,
@@ -422,7 +440,7 @@ export async function uploadProject(
         mobileLocalId: session.localId,
         deviceId: deviceServerId,
         deviceMobileLocalId: isNewDevice ? session.deviceLocalId : undefined,
-        status: session.status,
+        status: mapAuditStatusToServer(session.status),
         startedAt: new Date(session.startedAt).toISOString(),
         completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : undefined,
         notes: session.notes,
@@ -430,6 +448,43 @@ export async function uploadProject(
       });
     }
     
+    if (skippedSessions.length > 0) {
+      console.warn(`[SYNC] Skipped ${skippedSessions.length} sessions due to missing device data`);
+    }
+    
+    // Build newDevices array from all devices that need syncing (those without serverId)
+    const newDevices: MobileNewDevice[] = Array.from(devicesToSync.values())
+      .filter(d => !d.serverId) // Only include devices without serverId (new devices)
+      .map(d => ({
+        mobileLocalId: d.localId,
+        elementId: d.elementId,
+        name: d.name,
+        znacznik: d.znacznik,
+        building: d.building,
+        level: d.level,
+        zone: d.zone,
+        system: d.system,
+        group: d.group,
+        type: d.type,
+        drawingNumber: d.drawingNumber,
+        routeNumber: d.routeNumber,
+        disciplineCode: d.disciplineCode,
+        createdAt: new Date(d.createdAt).toISOString(),
+        additionalDataJson: d.additionalDataJson,
+      }));
+    
+    // Check if there's anything to send after processing
+    if (newDevices.length === 0 && auditSessions.length === 0) {
+      const skippedMessage = skippedSessions.length > 0 
+        ? `Pominięto ${skippedSessions.length} audytów z powodu brakujących urządzeń.`
+        : 'Brak danych do wysłania';
+      return {
+        success: skippedSessions.length === 0,
+        message: skippedMessage,
+        stats: { devicesUploaded: 0, auditsUploaded: 0, answersUploaded: 0 },
+      };
+    }
+
     console.log('[SYNC] Upload request:', {
       projectId,
       newDevicesCount: newDevices.length,
@@ -451,12 +506,16 @@ export async function uploadProject(
       auditSessions,
     };
 
-    // Update status to uploading
-    for (const device of pendingDevices) {
-      await updateDeviceSyncStatus(device.localId, 'uploading');
+    // Update status to uploading for all devices and sessions being synced
+    for (const device of devicesToSync.values()) {
+      if (!device.serverId) { // Only for new devices
+        await updateDeviceSyncStatus(device.localId, 'uploading');
+      }
     }
     for (const session of pendingSessions) {
-      await updateAuditSessionSyncStatus(session.localId, 'uploading');
+      if (!skippedSessions.includes(session.localId)) {
+        await updateAuditSessionSyncStatus(session.localId, 'uploading');
+      }
     }
 
     // Send to server
@@ -508,12 +567,16 @@ export async function uploadProject(
         },
       };
     } else {
-      // Revert to pending status
-      for (const device of pendingDevices) {
-        await updateDeviceSyncStatus(device.localId, 'upload_error');
+      // Revert to error status for all devices and sessions that were being synced
+      for (const device of devicesToSync.values()) {
+        if (!device.serverId) {
+          await updateDeviceSyncStatus(device.localId, 'upload_error');
+        }
       }
       for (const session of pendingSessions) {
-        await updateAuditSessionSyncStatus(session.localId, 'upload_error');
+        if (!skippedSessions.includes(session.localId)) {
+          await updateAuditSessionSyncStatus(session.localId, 'upload_error');
+        }
       }
 
       return {
@@ -522,6 +585,27 @@ export async function uploadProject(
       };
     }
   } catch (error) {
+    console.error('[SYNC] Upload error:', error);
+    
+    // Revert statuses to pending on error - otherwise they stay as 'uploading' forever
+    try {
+      const pendingDevices = await getPendingDevices(projectId);
+      const pendingSessions = await getPendingAuditSessions(projectId);
+      
+      for (const device of pendingDevices) {
+        if (device.syncStatus === 'uploading') {
+          await updateDeviceSyncStatus(device.localId, 'pending_upload');
+        }
+      }
+      for (const session of pendingSessions) {
+        if (session.syncStatus === 'uploading') {
+          await updateAuditSessionSyncStatus(session.localId, 'pending_upload');
+        }
+      }
+    } catch (revertError) {
+      console.error('[SYNC] Error reverting statuses:', revertError);
+    }
+    
     return {
       success: false,
       message: getErrorMessage(error),
