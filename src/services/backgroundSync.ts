@@ -5,9 +5,11 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { isOnline, uploadProject, getSyncStatus } from './syncService';
 import { useSettingsStore } from '../stores/settingsStore';
+import { fixStuckUploadingSessions } from '../database/audits';
+import { fixStuckUploadingDevices } from '../database/devices';
 
-const SYNC_INTERVAL_MS = 30000; // 30 seconds
-const MIN_SYNC_INTERVAL_MS = 10000; // Minimum 10 seconds between syncs
+const SYNC_INTERVAL_MS = 15000; // 15 seconds (reduced from 30 for faster sync)
+const MIN_SYNC_INTERVAL_MS = 5000; // Minimum 5 seconds between syncs
 
 let syncInterval: NodeJS.Timeout | null = null;
 let lastSyncTime = 0;
@@ -40,9 +42,10 @@ async function performBackgroundSync() {
     return;
   }
 
-  // Check if background sync is enabled
+  // Check if background sync is enabled (default to TRUE if not set)
   const { settings } = useSettingsStore.getState();
-  if (!settings.backgroundSyncEnabled) {
+  if (settings.backgroundSyncEnabled === false) {
+    console.log('[BackgroundSync] Sync disabled in settings, skipping');
     return;
   }
 
@@ -57,6 +60,13 @@ async function performBackgroundSync() {
     if (!online) {
       return;
     }
+
+    // Fix any stuck sessions/devices BEFORE checking pending count
+    // This ensures items stuck at 'uploading' status get reset to 'pending_upload'
+    await Promise.all([
+      fixStuckUploadingSessions(currentProjectId),
+      fixStuckUploadingDevices(currentProjectId),
+    ]);
 
     // Check if there's anything to sync
     const status = await getSyncStatus(currentProjectId);
@@ -136,6 +146,61 @@ export function triggerSync() {
   // Manually trigger a sync (e.g., when user completes an audit)
   lastSyncTime = 0; // Reset to allow immediate sync
   performBackgroundSync();
+}
+
+// Force sync - ignores time limits and backgroundSyncEnabled setting
+export async function forceSync(): Promise<{ success: boolean; message: string }> {
+  if (!currentProjectId) {
+    return { success: false, message: 'Brak wybranego projektu' };
+  }
+
+  if (isCurrentlySyncing) {
+    return { success: false, message: 'Synchronizacja już trwa' };
+  }
+
+  try {
+    const online = await isOnline();
+    if (!online) {
+      return { success: false, message: 'Brak połączenia z internetem' };
+    }
+
+    // Fix stuck sessions FIRST
+    console.log('[ForceSync] Fixing stuck sessions...');
+    await Promise.all([
+      fixStuckUploadingSessions(currentProjectId),
+      fixStuckUploadingDevices(currentProjectId),
+    ]);
+
+    // Now check pending count
+    const status = await getSyncStatus(currentProjectId);
+    console.log(`[ForceSync] Pending: ${status.pendingDevices} devices, ${status.pendingAudits} audits`);
+    
+    if (status.pendingDevices === 0 && status.pendingAudits === 0) {
+      return { success: true, message: 'Brak danych do wysłania' };
+    }
+
+    isCurrentlySyncing = true;
+    notifyListeners('start');
+
+    const result = await uploadProject(currentProjectId, 0);
+
+    if (result.success) {
+      console.log('[ForceSync] Success:', result.stats);
+      notifyListeners('success', `Wysłano: ${result.stats?.auditsUploaded || 0} audytów`);
+      return { success: true, message: `Wysłano ${result.stats?.auditsUploaded || 0} audytów` };
+    } else {
+      console.log('[ForceSync] Failed:', result.message);
+      notifyListeners('error', result.message);
+      return { success: false, message: result.message };
+    }
+  } catch (error) {
+    console.error('[ForceSync] Error:', error);
+    const message = error instanceof Error ? error.message : 'Błąd synchronizacji';
+    notifyListeners('error', message);
+    return { success: false, message };
+  } finally {
+    isCurrentlySyncing = false;
+  }
 }
 
 export function isBackgroundSyncRunning() {

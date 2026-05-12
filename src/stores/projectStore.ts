@@ -33,8 +33,11 @@ import {
 import { 
   startBackgroundSync, 
   stopBackgroundSync,
-  setBackgroundSyncProject 
+  setBackgroundSyncProject,
+  forceSync 
 } from '../services/backgroundSync';
+import { fixStuckUploadingSessions } from '../database/audits';
+import { fixStuckUploadingDevices } from '../database/devices';
 import { getProjects as apiGetProjects } from '../services/api';
 import { getPendingAuditSessions } from '../database/audits';
 import { flushPendingWrites } from './auditStore';
@@ -390,6 +393,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     
     // Flush any pending debounced writes before uploading
     await flushPendingWrites();
+    
+    set({ syncProgress: 'Naprawianie utknętych sesji...' });
+    
+    // Fix any stuck sessions/devices before uploading
+    try {
+      await Promise.all([
+        fixStuckUploadingSessions(currentProject.id),
+        fixStuckUploadingDevices(currentProject.id),
+      ]);
+    } catch (err) {
+      console.warn('[Upload] Error fixing stuck sessions:', err);
+    }
     
     set({ syncProgress: 'Wysyłanie danych...' });
     

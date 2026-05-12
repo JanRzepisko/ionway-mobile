@@ -996,8 +996,11 @@ export function DevicesScreen() {
 
   const clearAllFilters = useCallback(() => {
     setSearchQuery('');
-    handleBuildingFilterChange([]);
-  }, [handleBuildingFilterChange]);
+    setSelectedBuildings([]);
+    setSelectedLevels([]);
+    setSelectedZones([]);
+    setSelectedTypes([]);
+  }, []);
 
   if (isInitializing) {
     return (
@@ -1317,8 +1320,8 @@ export function DevicesScreen() {
                   {/* Sync status for completed audits */}
                   {auditStatus.status === 'completed' && (
                     <View style={[
-                      styles.syncBadge,
-                      auditStatus.syncStatus === 'synced' ? styles.syncBadgeSynced : styles.syncBadgePending
+                      styles.auditSyncBadge,
+                      auditStatus.syncStatus === 'synced' ? styles.auditSyncBadgeSynced : styles.auditSyncBadgePending
                     ]}>
                       <Icon 
                         name={auditStatus.syncStatus === 'synced' ? 'cloud-check' : 'cloud-upload'} 
@@ -1781,15 +1784,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
   },
-  syncBadge: {
+  auditSyncBadge: {
     width: 24,
     height: 24,
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  syncBadgeSynced: { backgroundColor: colors.success + '20' },
-  syncBadgePending: { backgroundColor: colors.warning + '20' },
+  auditSyncBadgeSynced: { backgroundColor: colors.success + '20' },
+  auditSyncBadgePending: { backgroundColor: colors.warning + '20' },
   auditBadge: {
     flexDirection: 'row',
     minWidth: 28,

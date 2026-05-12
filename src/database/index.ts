@@ -81,7 +81,10 @@ export {
   getAuditSessionsByDevice,
   getAuditSessionsByProject,
   getAuditSessionsByProject as getAllAuditSessions,
+  getCompletedSessionsForProject,
+  getAllSessionsForProject,
   getInProgressSession,
+  getExistingSessionForDevice,
   completeAuditSession,
   updateAuditSessionSyncStatus,
   getPendingAuditSessions,
@@ -94,7 +97,8 @@ export {
   getAnswersMap,
   updateAnswerSyncStatus,
   getPendingAnswersForSession,
-  getAuditStats
+  getAuditStats,
+  syncAuditSessionsFromServer
 } from './audits';
 
 // Helper alias

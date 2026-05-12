@@ -105,6 +105,38 @@ export async function getAuditSessionsByProject(projectId: string): Promise<Audi
   return rows.map(mapRowToAuditSession);
 }
 
+export async function getCompletedSessionsForProject(projectId: string): Promise<AuditSession[]> {
+  const db = await getDatabase();
+  
+  // Include both completed and in_progress sessions that have answers
+  const rows = await db.getAllAsync<AuditSessionRow>(
+    `SELECT s.* FROM audit_sessions s
+     WHERE s.project_id = ? 
+     AND s.status IN ('completed', 'in_progress')
+     AND EXISTS (SELECT 1 FROM audit_answers a WHERE a.audit_session_local_id = s.local_id)
+     ORDER BY COALESCE(s.completed_at, s.started_at) DESC`,
+    [projectId]
+  );
+
+  return rows.map(mapRowToAuditSession);
+}
+
+// Get ALL in_progress and completed sessions for a project (for copy feature in batch audits)
+export async function getAllSessionsForProject(projectId: string): Promise<AuditSession[]> {
+  const db = await getDatabase();
+  
+  // Return all sessions regardless of answers - useful for batch audit copy feature
+  const rows = await db.getAllAsync<AuditSessionRow>(
+    `SELECT * FROM audit_sessions 
+     WHERE project_id = ? 
+     AND status IN ('completed', 'in_progress')
+     ORDER BY started_at DESC`,
+    [projectId]
+  );
+
+  return rows.map(mapRowToAuditSession);
+}
+
 export async function getInProgressSession(
   deviceId: string
 ): Promise<AuditSession | null> {
@@ -116,6 +148,28 @@ export async function getInProgressSession(
      ORDER BY started_at DESC LIMIT 1`,
     [deviceId]
   );
+  
+  return row ? mapRowToAuditSession(row) : null;
+}
+
+/**
+ * Check if device has ANY audit session (regardless of status)
+ */
+export async function getExistingSessionForDevice(
+  deviceId: string
+): Promise<AuditSession | null> {
+  const db = await getDatabase();
+  
+  console.log(`[DB getExistingSessionForDevice] Looking for device: ${deviceId}`);
+  
+  const row = await db.getFirstAsync<AuditSessionRow>(
+    `SELECT * FROM audit_sessions 
+     WHERE device_id = ? 
+     ORDER BY started_at DESC LIMIT 1`,
+    [deviceId]
+  );
+  
+  console.log(`[DB getExistingSessionForDevice] Found: ${row ? `session ${row.local_id}` : 'none'}`);
 
   return row ? mapRowToAuditSession(row) : null;
 }
@@ -175,15 +229,16 @@ export async function getPendingAuditSessions(projectId: string): Promise<AuditS
 export async function fixStuckUploadingSessions(projectId: string): Promise<number> {
   const db = await getDatabase();
   
+  // Fix both 'uploading' (stuck) and 'upload_error' (failed) sessions
   const result = await db.runAsync(
     `UPDATE audit_sessions 
      SET sync_status = 'pending_upload'
-     WHERE project_id = ? AND sync_status = 'uploading'`,
+     WHERE project_id = ? AND sync_status IN ('uploading', 'upload_error')`,
     [projectId]
   );
   
   if (result.changes > 0) {
-    console.log(`[DB] Fixed ${result.changes} stuck uploading sessions`);
+    console.log(`[DB] Fixed ${result.changes} stuck/failed sessions`);
   }
   
   return result.changes;
@@ -233,11 +288,15 @@ export async function upsertAnswer(
 ): Promise<AuditAnswer> {
   const db = await getDatabase();
   
+  console.log(`[DB upsertAnswer] sessionLocalId=${auditSessionLocalId}, fieldId=${formFieldId}, value=${value}`);
+  
   const existing = await db.getFirstAsync<AuditAnswerRow>(
     `SELECT * FROM audit_answers 
      WHERE audit_session_local_id = ? AND form_field_id = ?`,
     [auditSessionLocalId, formFieldId]
   );
+  
+  console.log(`[DB upsertAnswer] existing=${existing ? 'found' : 'not found'}`);
 
   const now = Date.now();
 
@@ -412,6 +471,164 @@ export async function deleteLocalAuditSession(localId: string): Promise<boolean>
   
   console.log(`[DB] Deleted local audit session ${localId} with ${result.changes} rows affected`);
   return result.changes > 0;
+}
+
+// -----------------------------------------------------------------------------
+// Server Sync - Update local DB from server data
+// -----------------------------------------------------------------------------
+
+/**
+ * Sync audit sessions from server - updates local DB with server state
+ * This handles: status updates, new sessions from server, deleted sessions
+ */
+export async function syncAuditSessionsFromServer(
+  projectId: string,
+  serverSessions: Array<{
+    id: string;
+    mobileLocalId: string;
+    deviceId: string;
+    auditorId: string;
+    status: string;
+    startedAt: string;
+    completedAt?: string;
+    notes?: string;
+    updatedAt?: string;
+    answers: Array<{
+      id: string;
+      mobileLocalId: string;
+      formFieldId: string;
+      logicalDataColumnNumber?: number;
+      valueText?: string;
+      valueJson?: string;
+      comment?: string;
+      answeredAt: string;
+    }>;
+  }>,
+  deletedSessionIds: string[]
+): Promise<{ updated: number; deleted: number; created: number; markedForResend: number }> {
+  const db = await getDatabase();
+  let updated = 0;
+  let deleted = 0;
+  let created = 0;
+
+  // Map server status to local status
+  const mapServerStatus = (status: string): AuditStatus => {
+    switch (status) {
+      case 'Draft': return 'draft';
+      case 'InProgress': return 'in_progress';
+      case 'Completed': return 'completed';
+      case 'Cancelled': return 'cancelled';
+      default: return 'in_progress';
+    }
+  };
+
+  // Delete sessions that were deleted on server
+  for (const mobileLocalId of deletedSessionIds) {
+    // First delete answers
+    await db.runAsync(
+      'DELETE FROM audit_answers WHERE audit_session_local_id = ?',
+      [mobileLocalId]
+    );
+    // Then delete session
+    const result = await db.runAsync(
+      'DELETE FROM audit_sessions WHERE local_id = ?',
+      [mobileLocalId]
+    );
+    if (result.changes > 0) {
+      deleted++;
+      console.log(`[DB Sync] Deleted session ${mobileLocalId} (deleted on server)`);
+    }
+  }
+
+  // Process server sessions
+  for (const serverSession of serverSessions) {
+    const localSession = await db.getFirstAsync<{ 
+      local_id: string; 
+      status: string; 
+      sync_status: string;
+      completed_at: number | null;
+    }>(
+      'SELECT local_id, status, sync_status, completed_at FROM audit_sessions WHERE local_id = ?',
+      [serverSession.mobileLocalId]
+    );
+
+    if (localSession) {
+      // Session exists locally - check if we need to update
+      const serverStatus = mapServerStatus(serverSession.status);
+      const serverCompletedAt = serverSession.completedAt ? new Date(serverSession.completedAt).getTime() : null;
+      
+      // Only update if server has newer/different data AND local is already synced
+      // Don't overwrite local pending changes
+      if (localSession.sync_status === 'synced') {
+        const needsUpdate = localSession.status !== serverStatus || 
+                          localSession.completed_at !== serverCompletedAt;
+        
+        if (needsUpdate) {
+          await db.runAsync(
+            `UPDATE audit_sessions 
+             SET status = ?, completed_at = ?, notes = ?, server_id = ?
+             WHERE local_id = ?`,
+            [
+              serverStatus,
+              serverCompletedAt,
+              serverSession.notes ?? null,
+              serverSession.id,
+              serverSession.mobileLocalId
+            ]
+          );
+          updated++;
+          console.log(`[DB Sync] Updated session ${serverSession.mobileLocalId}: status=${serverStatus}`);
+        }
+      }
+    } else {
+      // Session doesn't exist locally - this means it was created on web or another device
+      // We should NOT create these - they should only be created on mobile
+      // But we can log this for debugging
+      console.log(`[DB Sync] Server has session ${serverSession.mobileLocalId} that doesn't exist locally - skipping (sessions must be created on mobile)`);
+    }
+  }
+
+  // Handle local synced sessions that no longer exist on server
+  // Instead of deleting, mark them as "pending_upload" so they can be re-sent
+  const localSyncedSessions = await db.getAllAsync<{ local_id: string; status: string }>(
+    `SELECT local_id, status FROM audit_sessions 
+     WHERE project_id = ? AND sync_status = 'synced'`,
+    [projectId]
+  );
+
+  // Create a set of server session mobileLocalIds for quick lookup
+  const serverSessionIds = new Set(serverSessions.map(s => s.mobileLocalId));
+  
+  let markedForResend = 0;
+  // Find local sessions that are synced but not on server anymore
+  for (const localSession of localSyncedSessions) {
+    if (!serverSessionIds.has(localSession.local_id)) {
+      // This session was synced but no longer exists on server
+      // Mark it as pending_upload so it can be re-sent (not deleted!)
+      await db.runAsync(
+        `UPDATE audit_sessions 
+         SET sync_status = 'pending_upload', server_id = NULL
+         WHERE local_id = ?`,
+        [localSession.local_id]
+      );
+      // Also mark all answers as pending
+      await db.runAsync(
+        `UPDATE audit_answers 
+         SET sync_status = 'pending_upload', server_id = NULL
+         WHERE audit_session_local_id = ?`,
+        [localSession.local_id]
+      );
+      markedForResend++;
+      console.log(`[DB Sync] Session ${localSession.local_id} not on server - marked for re-upload (status: ${localSession.status})`);
+    }
+  }
+  
+  if (markedForResend > 0) {
+    console.log(`[DB Sync] Marked ${markedForResend} sessions for re-upload (deleted on server)`);
+  }
+
+  console.log(`[DB Sync] Sync complete: ${updated} updated, ${deleted} deleted, ${markedForResend} marked for resend`);
+  return { updated, deleted, created, markedForResend };
 }
 
 // -----------------------------------------------------------------------------

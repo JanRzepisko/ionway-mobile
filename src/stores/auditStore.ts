@@ -15,6 +15,7 @@ import {
   createAuditSession, 
   getAuditSession,
   getInProgressSession,
+  getExistingSessionForDevice,
   completeAuditSession,
   getAnswersMap,
   upsertAnswer,
@@ -96,6 +97,7 @@ interface AuditState {
   // Actions
   loadLocalSessions: (projectId: string) => Promise<void>;
   startAudit: (deviceId: string, projectId: string, userId: string) => Promise<boolean>;
+  startBatchAudit: (deviceIds: string[], projectId: string, userId: string) => Promise<boolean>;
   resumeAudit: (sessionId: string) => Promise<boolean>;
   loadFormConfig: (projectId: string) => Promise<void>;
   
@@ -164,8 +166,8 @@ export const useAuditStore = create<AuditState>((set, get) => ({
     set({ isLoading: true, error: null });
     
     try {
-      // Check for existing in-progress session
-      let session = await getInProgressSession(deviceId);
+      // Check for ANY existing session (not just in_progress)
+      let session = await getExistingSessionForDevice(deviceId);
       let isNewSession = false;
       
       if (!session) {
@@ -188,6 +190,7 @@ export const useAuditStore = create<AuditState>((set, get) => ({
       } else {
         // Load device for existing session
         const device = await getDevice(session.deviceId);
+        console.log(`[AuditStore] Using existing session (${session.status}) for device`);
         set({ currentDevice: device });
       }
       
@@ -214,6 +217,91 @@ export const useAuditStore = create<AuditState>((set, get) => ({
     } catch (error) {
       set({ 
         error: error instanceof Error ? error.message : 'Błąd rozpoczęcia audytu',
+        isLoading: false 
+      });
+      return false;
+    }
+  },
+
+  // Start batch audit - creates sessions for ALL devices immediately
+  startBatchAudit: async (deviceIds: string[], projectId: string, userId: string) => {
+    if (deviceIds.length === 0) {
+      set({ error: 'Brak urządzeń do audytu' });
+      return false;
+    }
+
+    set({ isLoading: true, error: null });
+    
+    try {
+      const firstDeviceId = deviceIds[0];
+      let firstSession: AuditSession | null = null;
+      let firstDevice: Device | null = null;
+      
+      // Create or get sessions for ALL devices
+      for (let i = 0; i < deviceIds.length; i++) {
+        const deviceId = deviceIds[i];
+        
+        // Check for ANY existing session (not just in_progress)
+        let session = await getExistingSessionForDevice(deviceId);
+        
+        if (!session) {
+          // Get device
+          const device = await getDevice(deviceId);
+          if (!device) {
+            console.warn(`[AuditStore] Device not found: ${deviceId}`);
+            continue;
+          }
+          
+          // Create new session
+          session = await createAuditSession(
+            projectId,
+            device.id,
+            device.localId,
+            userId
+          );
+          console.log(`[AuditStore] Created session for device ${i + 1}/${deviceIds.length}: ${device.name}`);
+          
+          // Store first device reference
+          if (i === 0) {
+            firstDevice = device;
+          }
+        } else {
+          console.log(`[AuditStore] Using existing session (${session.status}) for device ${i + 1}/${deviceIds.length}`);
+          if (i === 0) {
+            firstDevice = await getDevice(session.deviceId);
+          }
+        }
+        
+        // Keep reference to first session
+        if (i === 0) {
+          firstSession = session;
+        }
+      }
+      
+      if (!firstSession || !firstDevice) {
+        throw new Error('Nie udało się utworzyć sesji audytu');
+      }
+      
+      // Load answers for first session
+      const answersMap = await getAnswersMap(firstSession.localId);
+      
+      // Load form config
+      const formConfig = await getFullFormConfig(projectId);
+      
+      set({ 
+        currentSession: firstSession,
+        currentDevice: firstDevice,
+        formConfig,
+        answers: answersMap,
+        currentTabIndex: 0,
+        isLoading: false,
+        _sessionNeedsSyncOnFirstAnswer: answersMap.size === 0
+      });
+      
+      return true;
+    } catch (error) {
+      set({ 
+        error: error instanceof Error ? error.message : 'Błąd rozpoczęcia audytu zbiorowego',
         isLoading: false 
       });
       return false;
@@ -576,39 +664,83 @@ export const useAuditStore = create<AuditState>((set, get) => ({
         let session: AuditSession;
 
         if (i === 0) {
-          // First device - use existing session
+          // First device - use existing session from store
           const existingSession = get().currentSession;
           if (existingSession) {
             session = existingSession;
+            console.log(`[AuditStore] First device: using session from store: ${existingSession.localId}`);
           } else {
-            session = await createAuditSession(projectId, device.id, device.localId, userId);
+            // Fallback: check DB for existing session (use device.id!)
+            console.log(`[AuditStore] First device fallback: deviceId=${deviceId}, device.id=${device.id}`);
+            const dbSession = await getExistingSessionForDevice(device.id);
+            session = dbSession || await createAuditSession(projectId, device.id, device.localId, userId);
           }
         } else {
-          // Other devices - create new session
-          session = await createAuditSession(projectId, device.id, device.localId, userId);
+          // Other devices - check for existing session first (created by startBatchAudit)
+          // IMPORTANT: Use device.id (not deviceId from loop) because that's what session was created with
+          console.log(`[AuditStore] Looking for session: deviceId=${deviceId}, device.id=${device.id}, device.localId=${device.localId}`);
+          const existingSession = await getExistingSessionForDevice(device.id);
+          if (existingSession) {
+            session = existingSession;
+            console.log(`[AuditStore] Using existing session for device ${device.name}: ${existingSession.localId}`);
+          } else {
+            session = await createAuditSession(projectId, device.id, device.localId, userId);
+            console.log(`[AuditStore] Created new session for device ${device.name}`);
+          }
         }
         
         // Save answers - use per-device answer if available, otherwise use default
-        for (const [fieldId, answer] of defaultAnswers.entries()) {
-          let valueToSave = answer.valueText || null;
+        console.log(`[AuditStore] Saving answers for device ${device.name}, session ${session.localId}`);
+        console.log(`[AuditStore] defaultAnswers size: ${defaultAnswers.size}, perDeviceAnswers size: ${perDeviceAnswers.size}`);
+        
+        let savedCount = 0;
+        let perDeviceCount = 0;
+        
+        // Collect ALL field IDs that need to be saved (from both defaultAnswers and perDeviceAnswers)
+        const allFieldIds = new Set<string>();
+        for (const fieldId of defaultAnswers.keys()) {
+          allFieldIds.add(fieldId);
+        }
+        for (const fieldId of perDeviceAnswers.keys()) {
+          allFieldIds.add(fieldId);
+        }
+        
+        console.log(`[AuditStore] Total fields to save: ${allFieldIds.size}`);
+        
+        for (const fieldId of allFieldIds) {
+          const answer = defaultAnswers.get(fieldId);
+          let valueToSave = answer?.valueText || null;
           
           // Check if there's a per-device answer for this field
+          // Use device.id (consistent with how perDeviceAnswers was populated)
           const deviceAnswersMap = perDeviceAnswers.get(fieldId);
-          if (deviceAnswersMap && deviceAnswersMap.has(deviceId)) {
-            valueToSave = deviceAnswersMap.get(deviceId) ?? null;
+          if (deviceAnswersMap) {
+            // Try both device.id and deviceId (from loop) in case of mismatch
+            const perDeviceValue = deviceAnswersMap.get(device.id) ?? deviceAnswersMap.get(deviceId);
+            if (perDeviceValue !== undefined) {
+              console.log(`[AuditStore] Using per-device value for ${fieldId}: ${perDeviceValue}`);
+              valueToSave = perDeviceValue;
+              perDeviceCount++;
+            }
           }
           
-          await upsertAnswer(
-            session.id,
-            session.localId.toString(),
-            device.id,
-            fieldId,
-            userId,
-            valueToSave,
-            answer.logicalDataColumnNumber,
-            undefined
-          );
+          // Only save if we have a value (don't save null unless it was explicitly set)
+          if (valueToSave !== null) {
+            await upsertAnswer(
+              session.id,
+              session.localId.toString(),
+              device.id,
+              fieldId,
+              userId,
+              valueToSave,
+              answer?.logicalDataColumnNumber,
+              undefined
+            );
+            savedCount++;
+          }
         }
+        
+        console.log(`[AuditStore] Saved ${savedCount} answers (${perDeviceCount} with per-device values) for ${device.name}`);
 
         // Complete the session
         await completeAuditSession(session.localId, undefined);

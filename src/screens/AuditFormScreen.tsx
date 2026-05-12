@@ -4,8 +4,8 @@
 // =============================================================================
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { View, StyleSheet, ScrollView, Alert, BackHandler, TouchableOpacity, Animated, Modal as RNModal, FlatList } from 'react-native';
-import { Text, ActivityIndicator, Snackbar } from 'react-native-paper';
+import { View, StyleSheet, ScrollView, Alert, BackHandler, TouchableOpacity, Animated, Modal as RNModal, FlatList, TextInput } from 'react-native';
+import { Text, ActivityIndicator, Snackbar, Searchbar } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { useNavigation, useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
@@ -20,6 +20,7 @@ import { useAuditStore } from '../stores/auditStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAuthStore } from '../stores/authStore';
 import { FormTab, AuditAnswer, Device } from '../types';
+import { getExistingSessionForDevice, upsertAnswer } from '../database/audits';
 
 type RootStackParamList = {
   Devices: undefined;
@@ -53,6 +54,22 @@ export function AuditFormScreen() {
   const [showPerDeviceModal, setShowPerDeviceModal] = useState(false);
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
   
+  // Copy from another audit state
+  const [showCopyModal, setShowCopyModal] = useState(false);
+  const [copySearchQuery, setCopySearchQuery] = useState('');
+  const [copyFilterBuilding, setCopyFilterBuilding] = useState<string>('');
+  const [copyFilterLevel, setCopyFilterLevel] = useState<string>('');
+  const [copyFilterZone, setCopyFilterZone] = useState<string>('');
+  const [copyFilterType, setCopyFilterType] = useState<string>('');
+  const [activeCopyFilterModal, setActiveCopyFilterModal] = useState<'building' | 'level' | 'zone' | 'type' | null>(null);
+  const [copyFilterSearch, setCopyFilterSearch] = useState('');
+  const [completedSessions, setCompletedSessions] = useState<Array<{
+    session: import('../types').AuditSession;
+    device: Device | null;
+    answersCount: number;
+  }>>([]);
+  const [isCopying, setIsCopying] = useState(false);
+  
   const { user } = useAuthStore();
   const { currentProject, devices } = useProjectStore();
   
@@ -66,6 +83,7 @@ export function AuditFormScreen() {
     isSaving,
     error,
     startAudit,
+    startBatchAudit,
     resumeAudit,
     setCurrentTab,
     saveAnswer,
@@ -81,6 +99,18 @@ export function AuditFormScreen() {
   const [locationExpanded, setLocationExpanded] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
 
+  // Safe navigation helper - checks if we can go back, otherwise resets to Devices screen
+  const safeGoBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.reset({
+        index: 0,
+        routes: [{ name: 'Devices' }],
+      });
+    }
+  }, [navigation]);
+
   // Handle back button
   useFocusEffect(
     useCallback(() => {
@@ -91,7 +121,7 @@ export function AuditFormScreen() {
             'Dane są zapisane lokalnie. Możesz wrócić i kontynuować później.',
             [
               { text: 'Kontynuuj audyt', style: 'cancel' },
-              { text: 'Wyjdź', onPress: () => navigation.goBack() }
+              { text: 'Wyjdź', onPress: safeGoBack }
             ]
           );
           return true;
@@ -101,21 +131,27 @@ export function AuditFormScreen() {
 
       const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
       return () => subscription.remove();
-    }, [currentSession?.status, navigation])
+    }, [currentSession?.status, safeGoBack])
   );
 
   // Start or resume audit
   // If sessionId is provided (viewing existing audit), resume it
-  // Otherwise start new audit for first device
+  // For batch audit: start sessions for ALL devices immediately
+  // For single audit: start session for that device
   useEffect(() => {
     if (sessionId) {
       // Resume existing audit session (e.g., viewing completed audit)
       resumeAudit(sessionId);
     } else if (currentProject && user && allDeviceIds.length > 0) {
-      // Start new audit for first device to get form config
-      startAudit(allDeviceIds[0], currentProject.id, user.id);
+      if (isBatchAudit) {
+        // Batch audit - create sessions for ALL devices
+        startBatchAudit(allDeviceIds, currentProject.id, user.id);
+      } else {
+        // Single device audit
+        startAudit(allDeviceIds[0], currentProject.id, user.id);
+      }
     }
-  }, [currentProject?.id, user?.id, allDeviceIds[0], sessionId]);
+  }, [currentProject?.id, user?.id, allDeviceIds.length, sessionId, isBatchAudit]);
 
   // For batch audit: Load existing answers from in-progress sessions and detect differences
   useEffect(() => {
@@ -229,10 +265,13 @@ export function AuditFormScreen() {
     // Save to main answers (first device / default)
     await saveAnswer(fieldId, value, logicalDataColumnNumber);
     
-    // For batch audit: always update per-device answers
-    // When field doesn't exist yet: set all devices to same value
-    // When field exists: update all devices that are NOT customized (all have same value)
-    if (isBatchAudit) {
+    // For batch audit: always update per-device answers AND save to all device sessions
+    if (isBatchAudit && value !== null && user?.id) {
+      console.log(`[AuditForm] handleSaveAnswer batch: fieldId=${fieldId}, value=${value}, allDeviceIds=`, allDeviceIds);
+      
+      // Determine which devices should get this value
+      const devicesToUpdate: string[] = [];
+      
       setPerDeviceAnswers(prev => {
         const newMap = new Map(prev);
         const existingDeviceMap = newMap.get(fieldId);
@@ -240,7 +279,11 @@ export function AuditFormScreen() {
         if (!existingDeviceMap) {
           // First time setting this field - set same value for all devices
           const deviceMap = new Map<string, string | null>();
-          allDeviceIds.forEach(devId => deviceMap.set(devId, value));
+          allDeviceIds.forEach(devId => {
+            console.log(`[AuditForm] Init perDevice: devId=${devId}, value=${value}`);
+            deviceMap.set(devId, value);
+            devicesToUpdate.push(devId);
+          });
           newMap.set(fieldId, deviceMap);
         } else {
           // Field already exists - check if all values are the same (not customized)
@@ -249,15 +292,43 @@ export function AuditFormScreen() {
           
           if (allSame) {
             // All devices have same value - update all to new value
-            allDeviceIds.forEach(devId => existingDeviceMap.set(devId, value));
+            allDeviceIds.forEach(devId => {
+              existingDeviceMap.set(devId, value);
+              devicesToUpdate.push(devId);
+            });
+            console.log(`[AuditForm] Updated all devices to ${value}`);
+          } else {
+            console.log(`[AuditForm] Not updating - values are different (customized)`);
           }
-          // If values are different (customized), don't change them
-          // User must edit per-device manually in the modal
         }
         return newMap;
       });
+      
+      // Save to ALL device sessions (not just the first one)
+      // Skip first device since saveAnswer already saved it
+      for (let i = 1; i < allDeviceIds.length; i++) {
+        const devId = allDeviceIds[i];
+        try {
+          const session = await getExistingSessionForDevice(devId);
+          if (session) {
+            console.log(`[AuditForm] Saving to device ${i+1}/${allDeviceIds.length}: session=${session.localId}`);
+            await upsertAnswer(
+              session.id,
+              session.localId,
+              devId,
+              fieldId,
+              user.id,
+              value,
+              logicalDataColumnNumber,
+              undefined
+            );
+          }
+        } catch (error) {
+          console.error(`[AuditForm] Error saving to device ${devId}:`, error);
+        }
+      }
     }
-  }, [saveAnswer, isBatchAudit, allDeviceIds]);
+  }, [saveAnswer, isBatchAudit, allDeviceIds, user?.id]);
 
   // Check if a field has different answers across devices
   const hasVariedAnswers = useCallback((fieldId: string): boolean => {
@@ -281,7 +352,12 @@ export function AuditFormScreen() {
   }, [perDeviceAnswers, answers]);
 
   // Set answer for specific device (called from per-device modal)
-  const setDeviceAnswer = useCallback((fieldId: string, deviceId: string, value: string | null) => {
+  // Now also saves immediately to the database!
+  const setDeviceAnswer = useCallback(async (fieldId: string, deviceId: string, value: string | null) => {
+    console.log(`[AuditForm] setDeviceAnswer: fieldId=${fieldId}, deviceId=${deviceId}, value=${value}`);
+    console.log(`[AuditForm] allDeviceIds:`, allDeviceIds);
+    
+    // Update React state
     setPerDeviceAnswers(prev => {
       const newMap = new Map(prev);
       let deviceMap = newMap.get(fieldId);
@@ -290,7 +366,11 @@ export function AuditFormScreen() {
         // Initialize all devices with current main answer first
         deviceMap = new Map<string, string | null>();
         const mainValue = answers.get(fieldId)?.valueText ?? null;
-        allDeviceIds.forEach(devId => deviceMap!.set(devId, mainValue));
+        console.log(`[AuditForm] Initializing deviceMap for field ${fieldId}, mainValue=${mainValue}`);
+        allDeviceIds.forEach(devId => {
+          console.log(`[AuditForm] Setting devId=${devId} to mainValue=${mainValue}`);
+          deviceMap!.set(devId, mainValue);
+        });
         newMap.set(fieldId, deviceMap);
       }
       
@@ -299,9 +379,39 @@ export function AuditFormScreen() {
       updatedDeviceMap.set(deviceId, value);
       newMap.set(fieldId, updatedDeviceMap);
       
+      console.log(`[AuditForm] Updated deviceMap for field ${fieldId}:`, Object.fromEntries(updatedDeviceMap));
+      
       return newMap;
     });
-  }, [answers, allDeviceIds]);
+    
+    // IMMEDIATELY save to database for this specific device's session
+    // Save even if value is null (user cleared the answer) - use empty string
+    if (user?.id) {
+      try {
+        const session = await getExistingSessionForDevice(deviceId);
+        if (session) {
+          const field = formConfig?.fields.find(f => f.id === fieldId);
+          const valueToSave = value ?? ''; // Convert null to empty string for DB
+          console.log(`[AuditForm] Saving per-device answer to DB: session=${session.localId}, value=${valueToSave}`);
+          await upsertAnswer(
+            session.id,
+            session.localId,
+            deviceId,
+            fieldId,
+            user.id,
+            valueToSave,
+            field?.logicalDataColumnNumber,
+            undefined
+          );
+          console.log(`[AuditForm] Per-device answer saved to DB successfully`);
+        } else {
+          console.warn(`[AuditForm] No session found for device ${deviceId}, answer not saved to DB yet`);
+        }
+      } catch (error) {
+        console.error(`[AuditForm] Error saving per-device answer to DB:`, error);
+      }
+    }
+  }, [answers, allDeviceIds, user?.id, formConfig?.fields]);
 
   // Open per-device editor for a field
   const openPerDeviceEditor = useCallback((fieldId: string) => {
@@ -337,6 +447,158 @@ export function AuditFormScreen() {
     setShowPerDeviceModal(true);
   }, [answers, allDeviceIds]);
 
+  // Load sessions for copy modal (includes batch audit devices)
+  const loadCompletedSessions = useCallback(async () => {
+    if (!currentProject) return;
+    
+    try {
+      const { getAllSessionsForProject, getDevice, getAnswersMap } = await import('../database');
+      const sessions = await getAllSessionsForProject(currentProject.id);
+      
+      // Load device info and answer count for each session
+      const sessionsWithDevices = await Promise.all(
+        sessions.map(async (session) => {
+          const device = await getDevice(session.deviceId);
+          const answersMap = await getAnswersMap(session.localId);
+          return { session, device, answersCount: answersMap.size };
+        })
+      );
+      
+      // Filter out ONLY the current device (not all batch devices)
+      // This allows copying between devices in the same batch audit
+      const currentDeviceId = currentDevice?.id;
+      const filtered = sessionsWithDevices.filter(
+        ({ session }) => session.deviceId !== currentDeviceId
+      );
+      
+      setCompletedSessions(filtered);
+    } catch (error) {
+      console.error('Error loading sessions:', error);
+    }
+  }, [currentProject, currentDevice?.id]);
+
+  // Clear all copy filters
+  const clearCopyFilters = useCallback(() => {
+    setCopySearchQuery('');
+    setCopyFilterBuilding('');
+    setCopyFilterLevel('');
+    setCopyFilterZone('');
+    setCopyFilterType('');
+  }, []);
+
+  // Open copy modal
+  const openCopyModal = useCallback(() => {
+    clearCopyFilters();
+    loadCompletedSessions();
+    setShowCopyModal(true);
+  }, [loadCompletedSessions, clearCopyFilters]);
+
+  // Get filter options from completed sessions
+  const copyFilterOptions = useMemo(() => {
+    const buildings = new Set<string>();
+    const levels = new Set<string>();
+    const zones = new Set<string>();
+    const types = new Set<string>();
+    
+    completedSessions.forEach(({ device }) => {
+      if (device?.building) buildings.add(device.building);
+      if (device?.level) levels.add(device.level);
+      if (device?.zone) zones.add(device.zone);
+      if (device?.type) types.add(device.type);
+    });
+    
+    return {
+      buildings: Array.from(buildings).sort(),
+      levels: Array.from(levels).sort(),
+      zones: Array.from(zones).sort(),
+      types: Array.from(types).sort(),
+    };
+  }, [completedSessions]);
+
+  // Check if any copy filter is active
+  const hasCopyFilters = copySearchQuery || copyFilterBuilding || copyFilterLevel || copyFilterZone || copyFilterType;
+
+  // Copy answers from selected session
+  const copyFromSession = useCallback(async (sessionLocalId: string) => {
+    setIsCopying(true);
+    try {
+      const { getAnswersMap: getSessionAnswers } = await import('../database');
+      const sourceAnswers = await getSessionAnswers(sessionLocalId);
+      
+      if (!sourceAnswers || sourceAnswers.size === 0) {
+        Alert.alert('Błąd', 'Brak odpowiedzi do skopiowania.');
+        return;
+      }
+
+      // Copy each answer to current session
+      let copiedCount = 0;
+      for (const [fieldId, answer] of sourceAnswers) {
+        if (answer.valueText !== null && answer.valueText !== undefined) {
+          await saveAnswer(fieldId, answer.valueText, answer.logicalDataColumnNumber);
+          copiedCount++;
+          
+          // For batch audit, also update perDeviceAnswers
+          if (isBatchAudit) {
+            setPerDeviceAnswers(prev => {
+              const newMap = new Map(prev);
+              const deviceMap = new Map<string, string | null>();
+              allDeviceIds.forEach(devId => deviceMap.set(devId, answer.valueText ?? null));
+              newMap.set(fieldId, deviceMap);
+              return newMap;
+            });
+          }
+        }
+      }
+
+      setShowCopyModal(false);
+      Alert.alert(
+        'Skopiowano',
+        `Skopiowano ${copiedCount} odpowiedzi z wybranego audytu.`,
+        [{ text: 'OK' }]
+      );
+    } catch (error) {
+      console.error('Error copying answers:', error);
+      Alert.alert('Błąd', 'Nie udało się skopiować odpowiedzi.');
+    } finally {
+      setIsCopying(false);
+    }
+  }, [saveAnswer, isBatchAudit, allDeviceIds]);
+
+  // Filter sessions by search query and filters
+  const filteredSessions = useMemo(() => {
+    return completedSessions.filter(({ device }) => {
+      if (!device) return false;
+      
+      // Text search
+      if (copySearchQuery.trim()) {
+        const query = copySearchQuery.toLowerCase();
+        const matchesSearch = (
+          device.name?.toLowerCase().includes(query) ||
+          device.elementId?.toLowerCase().includes(query) ||
+          device.building?.toLowerCase().includes(query) ||
+          device.level?.toLowerCase().includes(query) ||
+          device.zone?.toLowerCase().includes(query) ||
+          device.type?.toLowerCase().includes(query)
+        );
+        if (!matchesSearch) return false;
+      }
+      
+      // Building filter
+      if (copyFilterBuilding && device.building !== copyFilterBuilding) return false;
+      
+      // Level filter
+      if (copyFilterLevel && device.level !== copyFilterLevel) return false;
+      
+      // Zone filter
+      if (copyFilterZone && device.zone !== copyFilterZone) return false;
+      
+      // Type filter
+      if (copyFilterType && device.type !== copyFilterType) return false;
+      
+      return true;
+    });
+  }, [completedSessions, copySearchQuery, copyFilterBuilding, copyFilterLevel, copyFilterZone, copyFilterType]);
+
   const handleBack = () => {
     if (currentSession?.status === 'in_progress') {
       Alert.alert(
@@ -344,11 +606,11 @@ export function AuditFormScreen() {
         'Dane są zapisane lokalnie. Możesz wrócić i kontynuować później.',
         [
           { text: 'Kontynuuj audyt', style: 'cancel' },
-          { text: 'Wyjdź', onPress: () => navigation.goBack() }
+          { text: 'Wyjdź', onPress: safeGoBack }
         ]
       );
     } else {
-      navigation.goBack();
+      safeGoBack();
     }
   };
 
@@ -405,6 +667,16 @@ export function AuditFormScreen() {
             try {
               if (isBatchAudit) {
                 // For batch audit, complete with per-device answers
+                console.log('[AuditForm] Completing batch audit');
+                console.log('[AuditForm] allDeviceIds:', allDeviceIds);
+                console.log('[AuditForm] answers size:', answers.size);
+                console.log('[AuditForm] perDeviceAnswers size:', perDeviceAnswers.size);
+                
+                // Log per-device answers content
+                perDeviceAnswers.forEach((deviceMap, fieldId) => {
+                  console.log(`[AuditForm] perDeviceAnswers[${fieldId}]:`, Object.fromEntries(deviceMap));
+                });
+                
                 const { completeAuditForMultipleDevicesWithVariedAnswers } = useAuditStore.getState();
                 const completed = await completeAuditForMultipleDevicesWithVariedAnswers(
                   allDeviceIds,
@@ -431,20 +703,18 @@ export function AuditFormScreen() {
                 if (uploaded) {
                   setSnackbarMessage(
                     isBatchAudit 
-                      ? `Zakończono ${allDeviceIds.length} audytów i wysłano na serwer`
-                      : 'Audyt zakończony i wysłany na serwer'
+                      ? `Zakończono ${allDeviceIds.length} audytów. Synchronizacja zakończona.`
+                      : 'Audyt zakończony. Synchronizacja zakończona.'
                   );
                 } else {
-                  setSnackbarMessage('Audyt zakończony. Wyślij później w ustawieniach.');
+                  setSnackbarMessage('Audyt zakończony. Synchronizacja nie powiodła się - spróbuj później.');
                 }
               } else {
                 setSnackbarMessage('Audyt zakończony. Wyślij gdy będziesz online.');
               }
               setSnackbarVisible(true);
 
-              setTimeout(() => {
-                navigation.goBack();
-              }, 1500);
+              setTimeout(safeGoBack, 1500);
             } catch (error) {
               Alert.alert('Błąd', error instanceof Error ? error.message : 'Wystąpił błąd');
             } finally {
@@ -643,6 +913,422 @@ export function AuditFormScreen() {
         </RNModal>
       )}
 
+      {/* Copy from another audit Modal */}
+      <RNModal
+        visible={showCopyModal}
+        onRequestClose={() => setShowCopyModal(false)}
+        animationType="slide"
+        presentationStyle="pageSheet"
+      >
+        <View style={[styles.copyModal, { paddingTop: insets.top }]}>
+          {/* Header */}
+          <View style={styles.copyModalHeader}>
+            <View style={styles.copyModalHeaderLeft}>
+              <Icon name="content-copy" size={28} color={colors.primary} />
+              <Text style={styles.copyModalTitle}>Kopiuj z audytu</Text>
+            </View>
+            <TouchableOpacity onPress={() => setShowCopyModal(false)} style={styles.copyModalClose}>
+              <Icon name="close" size={28} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Search bar - styled like DevicesScreen */}
+          <View style={styles.copySearchContainer}>
+            <View style={styles.copySearchIconContainer}>
+              <Icon name="magnify" size={24} color={colors.primary} />
+            </View>
+            <TextInput
+              style={styles.copySearchInput}
+              placeholder="Szukaj po nazwie, ID lub znaczniku..."
+              placeholderTextColor={colors.textDisabled}
+              value={copySearchQuery}
+              onChangeText={setCopySearchQuery}
+            />
+            {copySearchQuery.length > 0 && (
+              <TouchableOpacity style={styles.copySearchClear} onPress={() => setCopySearchQuery('')}>
+                <Icon name="close-circle" size={22} color={colors.textSecondary} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Filters - full-width rows like DevicesScreen */}
+          <View style={styles.copyFiltersContainer}>
+            {/* Building filter */}
+            {copyFilterOptions.buildings.length > 0 && (
+              <TouchableOpacity 
+                style={[styles.copyFilterRow, copyFilterBuilding && styles.copyFilterRowActive]}
+                onPress={() => setActiveCopyFilterModal('building')}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.copyFilterIcon, copyFilterBuilding && styles.copyFilterIconActive]}>
+                  <Icon name="office-building" size={22} color={copyFilterBuilding ? colors.primary : colors.textSecondary} />
+                </View>
+                <View style={styles.copyFilterContent}>
+                  <Text style={styles.copyFilterLabel}>BUDYNEK</Text>
+                  <Text style={[styles.copyFilterValue, copyFilterBuilding && styles.copyFilterValueActive]} numberOfLines={1}>
+                    {copyFilterBuilding || 'Wszystkie'}
+                  </Text>
+                </View>
+                <Icon name="chevron-right" size={20} color={colors.textDisabled} />
+              </TouchableOpacity>
+            )}
+
+            {/* Level filter */}
+            {copyFilterOptions.levels.length > 0 && (
+              <TouchableOpacity 
+                style={[styles.copyFilterRow, copyFilterLevel && styles.copyFilterRowActive]}
+                onPress={() => setActiveCopyFilterModal('level')}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.copyFilterIcon, copyFilterLevel && styles.copyFilterIconActive]}>
+                  <Icon name="layers" size={22} color={copyFilterLevel ? colors.primary : colors.textSecondary} />
+                </View>
+                <View style={styles.copyFilterContent}>
+                  <Text style={styles.copyFilterLabel}>PIĘTRO</Text>
+                  <Text style={[styles.copyFilterValue, copyFilterLevel && styles.copyFilterValueActive]} numberOfLines={1}>
+                    {copyFilterLevel || 'Wszystkie'}
+                  </Text>
+                </View>
+                <Icon name="chevron-right" size={20} color={colors.textDisabled} />
+              </TouchableOpacity>
+            )}
+
+            {/* Zone filter */}
+            {copyFilterOptions.zones.length > 0 && (
+              <TouchableOpacity 
+                style={[styles.copyFilterRow, copyFilterZone && styles.copyFilterRowActive]}
+                onPress={() => setActiveCopyFilterModal('zone')}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.copyFilterIcon, copyFilterZone && styles.copyFilterIconActive]}>
+                  <Icon name="map-marker-radius" size={22} color={copyFilterZone ? colors.primary : colors.textSecondary} />
+                </View>
+                <View style={styles.copyFilterContent}>
+                  <Text style={styles.copyFilterLabel}>STREFA</Text>
+                  <Text style={[styles.copyFilterValue, copyFilterZone && styles.copyFilterValueActive]} numberOfLines={1}>
+                    {copyFilterZone || 'Wszystkie'}
+                  </Text>
+                </View>
+                <Icon name="chevron-right" size={20} color={colors.textDisabled} />
+              </TouchableOpacity>
+            )}
+
+            {/* Type filter */}
+            {copyFilterOptions.types.length > 0 && (
+              <TouchableOpacity 
+                style={[styles.copyFilterRow, copyFilterType && styles.copyFilterRowActive]}
+                onPress={() => setActiveCopyFilterModal('type')}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.copyFilterIcon, copyFilterType && styles.copyFilterIconActive]}>
+                  <Icon name="tag" size={22} color={copyFilterType ? colors.primary : colors.textSecondary} />
+                </View>
+                <View style={styles.copyFilterContent}>
+                  <Text style={styles.copyFilterLabel}>TYP</Text>
+                  <Text style={[styles.copyFilterValue, copyFilterType && styles.copyFilterValueActive]} numberOfLines={1}>
+                    {copyFilterType || 'Wszystkie'}
+                  </Text>
+                </View>
+                <Icon name="chevron-right" size={20} color={colors.textDisabled} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Results count with clear filters */}
+          <View style={styles.copyResultsRow}>
+            <Text style={styles.copyResultsText}>
+              {filteredSessions.length} z {completedSessions.length} elementów
+            </Text>
+            {hasCopyFilters && (
+              <TouchableOpacity onPress={clearCopyFilters} style={styles.copyClearFiltersBtn}>
+                <Icon name="filter-remove" size={18} color={colors.error} />
+                <Text style={styles.copyClearFiltersText}>Wyczyść filtry</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* List */}
+          {isCopying ? (
+            <View style={styles.copyModalLoading}>
+              <ActivityIndicator size="large" color={colors.primary} />
+              <Text style={styles.copyModalLoadingText}>Kopiowanie odpowiedzi...</Text>
+            </View>
+          ) : filteredSessions.length === 0 ? (
+            <View style={styles.copyModalEmpty}>
+              <Icon name="package-variant" size={64} color={colors.textDisabled} />
+              <Text style={styles.copyModalEmptyTitle}>Brak elementów</Text>
+              <Text style={styles.copyModalEmptyText}>
+                {hasCopyFilters ? 'Zmień filtry aby zobaczyć wyniki' : 'Brak audytów z odpowiedziami'}
+              </Text>
+              {hasCopyFilters && (
+                <TouchableOpacity onPress={clearCopyFilters} style={styles.copyModalEmptyClear}>
+                  <Icon name="filter-remove" size={20} color={colors.primary} />
+                  <Text style={styles.copyModalEmptyClearText}>Wyczyść filtry</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ) : (
+            <FlatList
+              data={filteredSessions}
+              keyExtractor={(item) => item.session.localId}
+              style={styles.copyModalList}
+              contentContainerStyle={styles.copyModalListContent}
+              renderItem={({ item }) => {
+                const hasAnswers = item.answersCount > 0;
+                return (
+                  <TouchableOpacity 
+                    style={[
+                      styles.copyDeviceItem,
+                      item.session.status === 'completed' && styles.copyDeviceItemCompleted,
+                      !hasAnswers && styles.copyDeviceItemDisabled
+                    ]}
+                    onPress={() => {
+                      if (!hasAnswers) {
+                        Alert.alert('Brak odpowiedzi', 'To urządzenie nie ma jeszcze żadnych odpowiedzi do skopiowania.');
+                        return;
+                      }
+                      Alert.alert(
+                        'Kopiuj odpowiedzi',
+                        `Skopiować ${item.answersCount} odpowiedzi z "${item.device?.name || 'Nieznane urządzenie'}"?\n\nIstniejące odpowiedzi zostaną nadpisane.`,
+                        [
+                          { text: 'Anuluj', style: 'cancel' },
+                          { text: 'Kopiuj', onPress: () => copyFromSession(item.session.localId) }
+                        ]
+                      );
+                    }}
+                    activeOpacity={hasAnswers ? 0.7 : 1}
+                  >
+                    {/* Status indicator */}
+                    <View style={[
+                      styles.copyDeviceStatus,
+                      item.session.status === 'completed' ? styles.copyDeviceStatusCompleted : styles.copyDeviceStatusInProgress,
+                      !hasAnswers && styles.copyDeviceStatusEmpty
+                    ]}>
+                      <Icon 
+                        name={!hasAnswers ? 'file-document-outline' : item.session.status === 'completed' ? 'check' : 'clock-outline'} 
+                        size={16} 
+                        color={!hasAnswers ? colors.textDisabled : item.session.status === 'completed' ? colors.success : colors.warning} 
+                      />
+                    </View>
+
+                    {/* Device info */}
+                    <View style={styles.copyDeviceInfo}>
+                      <Text style={[styles.copyDeviceName, !hasAnswers && styles.copyDeviceNameDisabled]} numberOfLines={1}>
+                        {item.device?.name || 'Nieznane'}
+                      </Text>
+                      <View style={styles.copyDeviceIdRow}>
+                        <Text style={[styles.copyDeviceId, !hasAnswers && styles.copyDeviceIdDisabled]}>
+                          {item.device?.elementId || '-'}
+                        </Text>
+                        {hasAnswers ? (
+                          item.session.status === 'completed' ? (
+                            <View style={styles.copyDeviceBadgeCompleted}>
+                              <Text style={styles.copyDeviceBadgeText}>Zakończony</Text>
+                            </View>
+                          ) : (
+                            <View style={styles.copyDeviceBadgeInProgress}>
+                              <Text style={styles.copyDeviceBadgeTextInProgress}>W trakcie</Text>
+                            </View>
+                          )
+                        ) : (
+                          <View style={styles.copyDeviceBadgeEmpty}>
+                            <Text style={styles.copyDeviceBadgeEmptyText}>Brak odpowiedzi</Text>
+                          </View>
+                        )}
+                        {hasAnswers && (
+                          <View style={styles.copyDeviceAnswersBadge}>
+                            <Text style={styles.copyDeviceAnswersText}>{item.answersCount} odp.</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.copyDeviceTags}>
+                        {item.device?.building && (
+                          <View style={[styles.copyDeviceTag, !hasAnswers && styles.copyDeviceTagDisabled]}>
+                            <Text style={[styles.copyDeviceTagText, !hasAnswers && styles.copyDeviceTagTextDisabled]}>{item.device.building}</Text>
+                          </View>
+                        )}
+                        {item.device?.level && (
+                          <View style={[styles.copyDeviceTag, !hasAnswers && styles.copyDeviceTagDisabled]}>
+                            <Text style={[styles.copyDeviceTagText, !hasAnswers && styles.copyDeviceTagTextDisabled]}>{item.device.level}</Text>
+                          </View>
+                        )}
+                        {item.device?.zone && (
+                          <View style={[styles.copyDeviceTag, !hasAnswers && styles.copyDeviceTagDisabled]}>
+                            <Text style={[styles.copyDeviceTagText, !hasAnswers && styles.copyDeviceTagTextDisabled]}>{item.device.zone}</Text>
+                          </View>
+                        )}
+                        {item.device?.type && (
+                          <View style={[styles.copyDeviceTag, !hasAnswers && styles.copyDeviceTagDisabled]}>
+                            <Text style={[styles.copyDeviceTagText, !hasAnswers && styles.copyDeviceTagTextDisabled]}>{item.device.type}</Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Copy icon */}
+                    <View style={styles.copyDeviceAction}>
+                      <Icon name={hasAnswers ? "content-copy" : "file-hidden"} size={22} color={hasAnswers ? colors.primary : colors.textDisabled} />
+                    </View>
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          )}
+
+          {/* Footer */}
+          <View style={[styles.copyModalFooter, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
+            <TouchableOpacity style={styles.copyModalCancel} onPress={() => setShowCopyModal(false)}>
+              <Text style={styles.copyModalCancelText}>Zamknij</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Copy Filter Modal - pageSheet like DevicesScreen */}
+          <RNModal
+            visible={activeCopyFilterModal !== null}
+            onRequestClose={() => { setActiveCopyFilterModal(null); setCopyFilterSearch(''); }}
+            animationType="slide"
+            presentationStyle="pageSheet"
+          >
+            <View style={[styles.filterModalContainer, { paddingTop: insets.top }]}>
+              {/* Header */}
+              <View style={styles.filterModalHeader}>
+                <View style={styles.filterModalHeaderLeft}>
+                  <Icon 
+                    name={
+                      activeCopyFilterModal === 'building' ? 'office-building' :
+                      activeCopyFilterModal === 'level' ? 'layers' :
+                      activeCopyFilterModal === 'zone' ? 'map-marker-radius' : 'tag'
+                    } 
+                    size={28} 
+                    color={colors.primary} 
+                  />
+                  <Text style={styles.filterModalTitle}>
+                    {activeCopyFilterModal === 'building' ? 'Budynek' :
+                     activeCopyFilterModal === 'level' ? 'Piętro' :
+                     activeCopyFilterModal === 'zone' ? 'Strefa' : 'Typ'}
+                  </Text>
+                </View>
+                <TouchableOpacity 
+                  onPress={() => { setActiveCopyFilterModal(null); setCopyFilterSearch(''); }} 
+                  style={styles.filterModalCloseBtn}
+                >
+                  <Icon name="close" size={28} color={colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Search */}
+              <View style={styles.filterModalSearchContainer}>
+                <Icon name="magnify" size={24} color={colors.textSecondary} />
+                <TextInput
+                  style={styles.filterModalSearchInput}
+                  placeholder={`Szukaj w ${
+                    activeCopyFilterModal === 'building' ? 'budynek' :
+                    activeCopyFilterModal === 'level' ? 'piętro' :
+                    activeCopyFilterModal === 'zone' ? 'strefa' : 'typ'
+                  }...`}
+                  placeholderTextColor={colors.textDisabled}
+                  value={copyFilterSearch}
+                  onChangeText={setCopyFilterSearch}
+                />
+                {copyFilterSearch.length > 0 && (
+                  <TouchableOpacity onPress={() => setCopyFilterSearch('')}>
+                    <Icon name="close-circle" size={24} color={colors.textSecondary} />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* Current selection and clear */}
+              {((activeCopyFilterModal === 'building' && copyFilterBuilding) ||
+                (activeCopyFilterModal === 'level' && copyFilterLevel) ||
+                (activeCopyFilterModal === 'zone' && copyFilterZone) ||
+                (activeCopyFilterModal === 'type' && copyFilterType)) && (
+                <View style={styles.filterModalSelectedRow}>
+                  <Text style={styles.filterModalSelectedText}>
+                    Wybrano: {
+                      activeCopyFilterModal === 'building' ? copyFilterBuilding :
+                      activeCopyFilterModal === 'level' ? copyFilterLevel :
+                      activeCopyFilterModal === 'zone' ? copyFilterZone : copyFilterType
+                    }
+                  </Text>
+                  <TouchableOpacity onPress={() => {
+                    if (activeCopyFilterModal === 'building') setCopyFilterBuilding('');
+                    if (activeCopyFilterModal === 'level') setCopyFilterLevel('');
+                    if (activeCopyFilterModal === 'zone') setCopyFilterZone('');
+                    if (activeCopyFilterModal === 'type') setCopyFilterType('');
+                  }}>
+                    <Text style={styles.filterModalClearText}>Wyczyść</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Options list */}
+              <FlatList
+                data={(activeCopyFilterModal === 'building' ? copyFilterOptions.buildings :
+                       activeCopyFilterModal === 'level' ? copyFilterOptions.levels :
+                       activeCopyFilterModal === 'zone' ? copyFilterOptions.zones :
+                       copyFilterOptions.types
+                      ).filter(opt => !copyFilterSearch || opt.toLowerCase().includes(copyFilterSearch.toLowerCase()))}
+                keyExtractor={(item) => item}
+                style={styles.filterModalList}
+                contentContainerStyle={styles.filterModalListContent}
+                renderItem={({ item }) => {
+                  const isSelected = 
+                    (activeCopyFilterModal === 'building' && copyFilterBuilding === item) ||
+                    (activeCopyFilterModal === 'level' && copyFilterLevel === item) ||
+                    (activeCopyFilterModal === 'zone' && copyFilterZone === item) ||
+                    (activeCopyFilterModal === 'type' && copyFilterType === item);
+                  
+                  return (
+                    <TouchableOpacity 
+                      style={[styles.filterModalOption, isSelected && styles.filterModalOptionSelected]}
+                      onPress={() => {
+                        if (activeCopyFilterModal === 'building') {
+                          setCopyFilterBuilding(isSelected ? '' : item);
+                        } else if (activeCopyFilterModal === 'level') {
+                          setCopyFilterLevel(isSelected ? '' : item);
+                        } else if (activeCopyFilterModal === 'zone') {
+                          setCopyFilterZone(isSelected ? '' : item);
+                        } else if (activeCopyFilterModal === 'type') {
+                          setCopyFilterType(isSelected ? '' : item);
+                        }
+                        setActiveCopyFilterModal(null);
+                        setCopyFilterSearch('');
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.filterModalCheckbox, isSelected && styles.filterModalCheckboxSelected]}>
+                        {isSelected && <Icon name="check" size={18} color={colors.primaryForeground} />}
+                      </View>
+                      <Text style={[styles.filterModalOptionText, isSelected && styles.filterModalOptionTextSelected]}>
+                        {item}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }}
+                ListEmptyComponent={
+                  <View style={styles.filterModalEmptyContainer}>
+                    <Icon name="magnify-close" size={48} color={colors.textDisabled} />
+                    <Text style={styles.filterModalEmptyText}>
+                      {copyFilterSearch ? 'Brak wyników wyszukiwania' : 'Brak dostępnych opcji'}
+                    </Text>
+                  </View>
+                }
+              />
+
+              {/* Done button */}
+              <View style={[styles.filterModalFooter, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]}>
+                <TouchableOpacity 
+                  style={styles.filterModalDoneBtn} 
+                  onPress={() => { setActiveCopyFilterModal(null); setCopyFilterSearch(''); }}
+                >
+                  <Text style={styles.filterModalDoneBtnText}>Gotowe</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </RNModal>
+        </View>
+      </RNModal>
+
       {/* Sticky Header with Device Info */}
       <View style={[styles.stickyHeader, { paddingTop: insets.top + spacing.sm }]}>
         <View style={styles.headerTop}>
@@ -651,6 +1337,14 @@ export function AuditFormScreen() {
           </Button>
           
           <View style={styles.headerRight}>
+            {!isPreviewMode && (
+              <TouchableOpacity 
+                style={styles.copyButton}
+                onPress={openCopyModal}
+              >
+                <Icon name="content-copy" size={20} color={colors.primary} />
+              </TouchableOpacity>
+            )}
             {isBatchAudit && (
               <TouchableOpacity 
                 style={styles.batchBadge}
@@ -865,6 +1559,7 @@ export function AuditFormScreen() {
       {/* Form */}
       {currentTab && (
         <DynamicFormRenderer
+          key={`tab-${currentTabIndex}`}
           tab={currentTab}
           fields={currentFields}
           optionValues={formConfig.optionValues}
@@ -903,7 +1598,7 @@ export function AuditFormScreen() {
           </Button>
         ) : isPreviewMode ? (
           <Button
-            onPress={() => navigation.goBack()}
+            onPress={safeGoBack}
             icon="close"
             size="medium"
           >
@@ -1263,6 +1958,497 @@ const styles = StyleSheet.create({
   },
   perDeviceModalDoneText: {
     fontSize: 17,
+    fontWeight: '700',
+    color: colors.primaryForeground,
+  },
+  
+  // Copy button in header
+  copyButton: {
+    padding: spacing.sm,
+    backgroundColor: colors.primaryLight,
+    borderRadius: borderRadius.md,
+    marginRight: spacing.sm,
+  },
+  
+  // Copy modal - styled like DevicesScreen
+  copyModal: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  copyModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.lg,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.outlineVariant,
+  },
+  copyModalHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  copyModalTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  copyModalClose: {
+    padding: spacing.sm,
+    backgroundColor: colors.surfaceVariant,
+    borderRadius: borderRadius.full,
+  },
+  // Search - styled like DevicesScreen
+  copySearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.xl,
+    marginHorizontal: spacing.lg,
+    marginVertical: spacing.md,
+    paddingRight: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.outlineVariant,
+    height: 52,
+  },
+  copySearchIconContainer: {
+    width: 52,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primaryLight,
+    borderTopLeftRadius: borderRadius.xl,
+    borderBottomLeftRadius: borderRadius.xl,
+  },
+  copySearchInput: {
+    flex: 1,
+    fontSize: 16,
+    color: colors.textPrimary,
+    paddingHorizontal: spacing.md,
+  },
+  copySearchClear: {
+    padding: spacing.sm,
+  },
+  // Filters container - full-width rows like DevicesScreen
+  copyFiltersContainer: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  copyFilterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: colors.outlineVariant,
+    gap: spacing.md,
+    minHeight: 60,
+  },
+  copyFilterRowActive: {
+    backgroundColor: colors.primaryLight,
+    borderColor: colors.primary,
+    borderWidth: 2,
+  },
+  copyFilterIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceVariant,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  copyFilterIconActive: {
+    backgroundColor: colors.primary + '25',
+  },
+  copyFilterContent: {
+    flex: 1,
+  },
+  copyFilterLabel: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginBottom: 2,
+    fontWeight: '500',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  copyFilterValue: {
+    fontSize: 15,
+    color: colors.textPrimary,
+    fontWeight: '500',
+  },
+  copyFilterValueActive: {
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  // Results row
+  copyResultsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.surfaceVariant,
+  },
+  copyResultsText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  copyClearFiltersBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  copyClearFiltersText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.error,
+  },
+  // List
+  copyModalList: {
+    flex: 1,
+  },
+  copyModalListContent: {
+    paddingVertical: spacing.sm,
+  },
+  // Device item - styled like DevicesScreen
+  copyDeviceItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    marginHorizontal: spacing.lg,
+    marginVertical: spacing.xs,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.outlineVariant,
+  },
+  copyDeviceItemCompleted: {
+    borderLeftWidth: 3,
+    borderLeftColor: colors.success,
+  },
+  copyDeviceItemDisabled: {
+    opacity: 0.6,
+    borderColor: colors.outlineVariant,
+    backgroundColor: colors.surfaceVariant,
+  },
+  copyDeviceStatus: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.md,
+  },
+  copyDeviceStatusCompleted: {
+    backgroundColor: colors.successLight,
+  },
+  copyDeviceStatusInProgress: {
+    backgroundColor: colors.warningLight,
+  },
+  copyDeviceStatusEmpty: {
+    backgroundColor: colors.surfaceVariant,
+  },
+  copyDeviceInfo: {
+    flex: 1,
+  },
+  copyDeviceName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  copyDeviceNameDisabled: {
+    color: colors.textDisabled,
+  },
+  copyDeviceIdRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: 2,
+  },
+  copyDeviceId: {
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  copyDeviceIdDisabled: {
+    color: colors.textDisabled,
+  },
+  copyDeviceBadgeCompleted: {
+    backgroundColor: colors.successLight,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.sm,
+  },
+  copyDeviceBadgeInProgress: {
+    backgroundColor: colors.warningLight,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.sm,
+  },
+  copyDeviceBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.success,
+  },
+  copyDeviceBadgeTextInProgress: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.warning,
+  },
+  copyDeviceBadgeEmpty: {
+    backgroundColor: colors.outlineVariant,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.sm,
+  },
+  copyDeviceBadgeEmptyText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textDisabled,
+  },
+  copyDeviceAnswersBadge: {
+    backgroundColor: colors.primaryLight,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.sm,
+  },
+  copyDeviceAnswersText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  copyDeviceTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+  },
+  copyDeviceTag: {
+    backgroundColor: colors.surfaceVariant,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.sm,
+  },
+  copyDeviceTagText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
+  copyDeviceTagDisabled: {
+    backgroundColor: colors.outlineVariant,
+  },
+  copyDeviceTagTextDisabled: {
+    color: colors.textDisabled,
+  },
+  copyDeviceAction: {
+    padding: spacing.sm,
+  },
+  // Loading and empty states
+  copyModalLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+  },
+  copyModalLoadingText: {
+    fontSize: 15,
+    color: colors.textSecondary,
+  },
+  copyModalEmpty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.xl,
+  },
+  copyModalEmptyTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  copyModalEmptyText: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  copyModalEmptyClear: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    backgroundColor: colors.primaryLight,
+    borderRadius: borderRadius.lg,
+    marginTop: spacing.md,
+  },
+  copyModalEmptyClearText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.primary,
+  },
+  // Footer
+  copyModalFooter: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.outlineVariant,
+  },
+  copyModalCancel: {
+    backgroundColor: colors.surfaceVariant,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.lg,
+    alignItems: 'center',
+  },
+  copyModalCancelText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  
+  // Filter Modal styles - same as DevicesScreen
+  filterModalContainer: {
+    flex: 1,
+    backgroundColor: colors.surface,
+  },
+  filterModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.outlineVariant,
+    backgroundColor: colors.surface,
+  },
+  filterModalHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  filterModalTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  filterModalCloseBtn: {
+    padding: spacing.sm,
+    backgroundColor: colors.surfaceVariant,
+    borderRadius: borderRadius.full,
+  },
+  filterModalSearchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceVariant,
+    borderRadius: borderRadius.lg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    marginHorizontal: spacing.xl,
+    marginVertical: spacing.lg,
+    gap: spacing.md,
+    height: 56,
+  },
+  filterModalSearchInput: {
+    flex: 1,
+    fontSize: 18,
+    color: colors.textPrimary,
+    padding: 0,
+  },
+  filterModalSelectedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.xl,
+    paddingBottom: spacing.md,
+  },
+  filterModalSelectedText: {
+    fontSize: 16,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  filterModalClearText: {
+    fontSize: 16,
+    color: colors.error,
+    fontWeight: '500',
+  },
+  filterModalList: {
+    flex: 1,
+  },
+  filterModalListContent: {
+    paddingHorizontal: spacing.xl,
+    paddingBottom: spacing.lg,
+    gap: spacing.sm,
+  },
+  filterModalOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.background,
+    gap: spacing.lg,
+    minHeight: 64,
+  },
+  filterModalOptionSelected: {
+    backgroundColor: colors.primaryLight,
+    borderWidth: 2,
+    borderColor: colors.primary,
+  },
+  filterModalCheckbox: {
+    width: 28,
+    height: 28,
+    borderRadius: borderRadius.sm,
+    borderWidth: 2,
+    borderColor: colors.outline,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterModalCheckboxSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  filterModalOptionText: {
+    fontSize: 18,
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  filterModalOptionTextSelected: {
+    fontWeight: '600',
+    color: colors.primary,
+  },
+  filterModalEmptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.xl * 3,
+    gap: spacing.lg,
+  },
+  filterModalEmptyText: {
+    fontSize: 16,
+    color: colors.textDisabled,
+    textAlign: 'center',
+  },
+  filterModalFooter: {
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.outlineVariant,
+    backgroundColor: colors.surface,
+  },
+  filterModalDoneBtn: {
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.lg,
+    borderRadius: borderRadius.lg,
+    alignItems: 'center',
+    minHeight: 56,
+    justifyContent: 'center',
+  },
+  filterModalDoneBtnText: {
+    fontSize: 18,
     fontWeight: '700',
     color: colors.primaryForeground,
   },

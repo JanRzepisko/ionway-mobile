@@ -7,7 +7,8 @@ import * as Network from 'expo-network';
 import { 
   downloadProjectData, 
   uploadProjectData, 
-  getErrorMessage 
+  getErrorMessage,
+  getCurrentApiUrl 
 } from './api';
 import { saveProject, updateProjectSyncState } from '../database/projects';
 import { 
@@ -18,6 +19,7 @@ import {
   getDeviceCount,
   getDevice
 } from '../database/devices';
+import { syncAuditSessionsFromServer } from '../database/audits';
 import { 
   saveFormTabs, 
   saveFormFields, 
@@ -136,6 +138,9 @@ export interface DownloadResult {
     tabs: number;
     fields: number;
     optionSets: number;
+    auditsDeleted?: number;
+    auditsUpdated?: number;
+    auditsMarkedForResend?: number;
   };
 }
 
@@ -302,20 +307,54 @@ export async function downloadProject(
     
     await saveDevices(devices);
 
+    // Sync audit sessions from server (two-way sync)
+    let auditSyncStats = { updated: 0, deleted: 0, created: 0, markedForResend: 0 };
+    if (response.auditSessions || response.deletedAuditSessionIds) {
+      onProgress?.('Synchronizacja audytów...');
+      console.log('[SYNC] Syncing audit sessions from server:', {
+        sessions: response.auditSessions?.length ?? 0,
+        deleted: response.deletedAuditSessionIds?.length ?? 0,
+      });
+      
+      auditSyncStats = await syncAuditSessionsFromServer(
+        projectId,
+        response.auditSessions ?? [],
+        response.deletedAuditSessionIds ?? []
+      );
+      
+      console.log('[SYNC] Audit sync complete:', auditSyncStats);
+    }
+
     onProgress?.('Synchronizacja zakończona');
 
     // Update project sync state
     await updateProjectSyncState(projectId, response.importVersion, devices.length);
 
     console.log('[SYNC] Download completed successfully');
+    
+    // Build summary message
+    let message = 'Dane pobrane pomyślnie';
+    if (auditSyncStats.deleted > 0) {
+      message += `. Usunięto ${auditSyncStats.deleted} audytów.`;
+    }
+    if (auditSyncStats.updated > 0) {
+      message += `. Zaktualizowano ${auditSyncStats.updated} audytów.`;
+    }
+    if (auditSyncStats.markedForResend > 0) {
+      message += `. ${auditSyncStats.markedForResend} audytów do ponownego wysłania.`;
+    }
+    
     return {
       success: true,
-      message: 'Dane pobrane pomyślnie',
+      message,
       stats: {
         devices: devices.length,
         tabs: formTabs.length,
         fields: formFields.length,
         optionSets: optionSetEntities.length,
+        auditsDeleted: auditSyncStats.deleted,
+        auditsUpdated: auditSyncStats.updated,
+        auditsMarkedForResend: auditSyncStats.markedForResend,
       },
     };
   } catch (error) {
@@ -443,6 +482,7 @@ export async function uploadProject(
         status: mapAuditStatusToServer(session.status),
         startedAt: new Date(session.startedAt).toISOString(),
         completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : undefined,
+        createdOffline: session.createdOffline ?? true,
         notes: session.notes,
         answers: mobileAnswers,
       });
@@ -519,20 +559,45 @@ export async function uploadProject(
     }
 
     // Send to server
-    console.log('[SYNC] Sending upload request...');
+    const apiUrl = getCurrentApiUrl();
+    console.log('[SYNC] Sending upload request to:', apiUrl);
+    console.log('[SYNC] Request summary:', {
+      projectId,
+      newDevices: newDevices.length,
+      auditSessions: auditSessions.length,
+      totalAnswers: auditSessions.reduce((sum, s) => sum + s.answers.length, 0),
+    });
+    
     const response = await uploadProjectData(projectId, request);
     
-    console.log('[SYNC] Upload response:', {
+    console.log('[SYNC] Upload response from', apiUrl, ':', {
       success: response.success,
       errors: response.errors,
-      deviceResults: response.deviceResults,
-      auditResults: response.auditResults,
+      deviceResults: response.deviceResults?.map(r => ({ 
+        mobileLocalId: r.mobileLocalId, 
+        success: r.success, 
+        alreadyExists: r.alreadyExists,
+        serverId: r.serverId 
+      })),
+      auditResults: response.auditResults?.map(r => ({ 
+        mobileLocalId: r.mobileLocalId, 
+        success: r.success, 
+        alreadyExists: r.alreadyExists,
+        warning: r.warning,
+        serverId: r.serverId,
+        answersSynced: r.answersSynced
+      })),
       stats: response.stats,
     });
 
     onProgress?.('Aktualizowanie statusów...');
 
     if (response.success) {
+      // Track warnings from duplicate rejections
+      const warnings: string[] = [];
+      let actuallyCreatedAudits = 0;
+      let skippedAsDuplicates = 0;
+      
       // Update device statuses
       for (const result of response.deviceResults) {
         if (result.success) {
@@ -552,14 +617,44 @@ export async function uploadProject(
           for (const answer of answers) {
             await updateAnswerSyncStatus(answer.localId, 'synced');
           }
+          
+          // Track if this was actually created or just marked as duplicate
+          if (result.alreadyExists) {
+            skippedAsDuplicates++;
+            if (result.warning) {
+              warnings.push(result.warning);
+            }
+          } else {
+            actuallyCreatedAudits++;
+          }
         } else {
           await updateAuditSessionSyncStatus(result.mobileLocalId, 'upload_error');
         }
       }
 
+      // Build appropriate message
+      let message = '';
+      if (actuallyCreatedAudits > 0) {
+        message = `Wysłano ${actuallyCreatedAudits} audytów`;
+      }
+      if (skippedAsDuplicates > 0) {
+        if (message) message += '. ';
+        message += `${skippedAsDuplicates} audytów już istnieje na serwerze`;
+      }
+      if (!message) {
+        message = response.stats.auditsCreated > 0 
+          ? 'Dane wysłane pomyślnie' 
+          : 'Brak nowych danych do wysłania';
+      }
+      
+      // Log warnings for debugging
+      if (warnings.length > 0) {
+        console.warn('[SYNC] Warnings from server:', warnings);
+      }
+
       return {
         success: true,
-        message: 'Dane wysłane pomyślnie',
+        message,
         stats: {
           devicesUploaded: response.stats.devicesCreated,
           auditsUploaded: response.stats.auditsCreated,

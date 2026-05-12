@@ -158,7 +158,7 @@ export interface DataColumnMapping {
 // -----------------------------------------------------------------------------
 // Audit Session & Answers
 // -----------------------------------------------------------------------------
-export type AuditStatus = 'in_progress' | 'completed' | 'cancelled';
+export type AuditStatus = 'draft' | 'in_progress' | 'completed' | 'cancelled';
 
 export interface AuditSession {
   id: string;
@@ -267,12 +267,40 @@ export interface MobileDownloadResponse {
   };
   devices: ApiDevice[];
   filterOptions: DeviceFilterOptions;
+  auditSessions?: ServerAuditSession[];
+  deletedAuditSessionIds?: string[];
   stats: {
     totalDevices: number;
     formTabs: number;
     formFields: number;
     optionSets: number;
+    auditSessions?: number;
+    deletedAuditSessions?: number;
   };
+}
+
+export interface ServerAuditSession {
+  id: string;
+  mobileLocalId: string;
+  deviceId: string;
+  auditorId: string;
+  status: string;
+  startedAt: string;
+  completedAt?: string;
+  notes?: string;
+  updatedAt?: string;
+  answers: ServerAuditAnswer[];
+}
+
+export interface ServerAuditAnswer {
+  id: string;
+  mobileLocalId: string;
+  formFieldId: string;
+  logicalDataColumnNumber?: number;
+  valueText?: string;
+  valueJson?: string;
+  comment?: string;
+  answeredAt: string;
 }
 
 export interface ApiFormTab {
@@ -375,6 +403,7 @@ export interface MobileAuditSession {
   status: string; // Server expects C# enum names: Draft, InProgress, Completed, Cancelled
   startedAt: string;
   completedAt?: string;
+  createdOffline?: boolean;
   notes?: string;
   answers: MobileAuditAnswer[];
 }
@@ -402,6 +431,7 @@ export interface DeviceSyncResult {
   mobileLocalId: string;
   serverId?: string;
   success: boolean;
+  alreadyExists?: boolean;
   error?: string;
 }
 
@@ -409,7 +439,11 @@ export interface AuditSyncResult {
   mobileLocalId: string;
   serverId?: string;
   success: boolean;
+  alreadyExists?: boolean;
+  warning?: string;
   answersSynced: number;
+  answersSkipped?: number;
+  answersFailed?: number;
   error?: string;
 }
 

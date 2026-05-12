@@ -620,21 +620,22 @@ export async function getDeviceCount(projectId: string): Promise<number> {
 }
 
 /**
- * Fix stuck devices that have 'uploading' status
- * These are devices where upload was interrupted and status wasn't reverted
+ * Fix stuck devices that have 'uploading' or 'upload_error' status
+ * These are devices where upload was interrupted or failed
  */
 export async function fixStuckUploadingDevices(projectId: string): Promise<number> {
   const db = await getDatabase();
   
+  // Fix both 'uploading' (stuck) and 'upload_error' (failed) devices
   const result = await db.runAsync(
     `UPDATE devices 
      SET sync_status = 'pending_upload'
-     WHERE project_id = ? AND sync_status = 'uploading'`,
+     WHERE project_id = ? AND sync_status IN ('uploading', 'upload_error')`,
     [projectId]
   );
   
   if (result.changes > 0) {
-    console.log(`[DB] Fixed ${result.changes} stuck uploading devices`);
+    console.log(`[DB] Fixed ${result.changes} stuck/failed devices`);
   }
   
   return result.changes;
