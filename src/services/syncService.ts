@@ -33,6 +33,7 @@ import {
   updateAuditSessionSyncStatus,
   updateAnswerSyncStatus 
 } from '../database/audits';
+import { uploadPendingPhotos } from './photoService';
 import { 
   Device, 
   FormTab, 
@@ -377,6 +378,7 @@ export interface UploadResult {
     devicesUploaded: number;
     auditsUploaded: number;
     answersUploaded: number;
+    photosUploaded?: number;
   };
 }
 
@@ -401,12 +403,34 @@ export async function uploadProject(
     
     // Get pending audit sessions
     const pendingSessions = await getPendingAuditSessions(projectId);
+    
+    // Get pending photos
+    const { getPhotosPendingUploadForProject } = await import('../database/photos');
+    const pendingPhotos = await getPhotosPendingUploadForProject(projectId);
 
-    if (pendingDevices.length === 0 && pendingSessions.length === 0) {
+    if (pendingDevices.length === 0 && pendingSessions.length === 0 && pendingPhotos.length === 0) {
       return {
         success: true,
         message: 'Brak danych do wysłania',
-        stats: { devicesUploaded: 0, auditsUploaded: 0, answersUploaded: 0 },
+        stats: { devicesUploaded: 0, auditsUploaded: 0, answersUploaded: 0, photosUploaded: 0 },
+      };
+    }
+    
+    // If only photos need to be uploaded (no new devices/sessions)
+    if (pendingDevices.length === 0 && pendingSessions.length === 0 && pendingPhotos.length > 0) {
+      onProgress?.('Wysyłanie zdjęć...');
+      const photoResult = await uploadPendingPhotos(projectId);
+      return {
+        success: true,
+        message: photoResult.uploaded > 0 
+          ? `Wysłano ${photoResult.uploaded} zdjęć` 
+          : 'Brak nowych zdjęć do wysłania',
+        stats: { 
+          devicesUploaded: 0, 
+          auditsUploaded: 0, 
+          answersUploaded: 0, 
+          photosUploaded: photoResult.uploaded 
+        },
       };
     }
 
@@ -427,15 +451,21 @@ export async function uploadProject(
     for (const session of pendingSessions) {
       const answers = await getAnswersBySession(session.localId);
       
-      const mobileAnswers: MobileAuditAnswer[] = answers.map(a => ({
-        mobileLocalId: a.localId,
-        formFieldId: a.formFieldId,
-        logicalDataColumnNumber: a.logicalDataColumnNumber,
-        valueText: a.valueText,
-        valueJson: a.valueJson,
-        comment: a.comment,
-        answeredAt: new Date(a.answeredAt).toISOString(),
-      }));
+      console.log(`[SYNC] Session ${session.localId} has ${answers.length} answers to sync`);
+      
+      const mobileAnswers: MobileAuditAnswer[] = answers.map(a => {
+        console.log(`[SYNC] Answer ${a.localId}: field=${a.formFieldId}, value="${a.valueText}", status=${a.syncStatus}`);
+        return {
+          mobileLocalId: a.localId,
+          formFieldId: a.formFieldId,
+          logicalDataColumnNumber: a.logicalDataColumnNumber,
+          valueText: a.valueText,
+          valueJson: a.valueJson,
+          comment: a.comment,
+          answeredAt: new Date(a.answeredAt).toISOString(),
+          updatedAt: new Date(a.answeredAt).toISOString(), // Use answeredAt as updatedAt for conflict resolution
+        };
+      });
 
       // Get device - first check devices we're already syncing, then fetch from DB
       let device = devicesToSync.get(session.deviceLocalId);
@@ -652,6 +682,32 @@ export async function uploadProject(
         console.warn('[SYNC] Warnings from server:', warnings);
       }
 
+      // Upload photos after audit sessions are synced
+      onProgress?.('Wysyłanie zdjęć...');
+      let photosUploaded = 0;
+      let photosFailed = 0;
+      try {
+        const photoResult = await uploadPendingPhotos(projectId);
+        photosUploaded = photoResult.uploaded;
+        photosFailed = photoResult.failed;
+        if (photoResult.uploaded > 0) {
+          console.log(`[SYNC] Uploaded ${photoResult.uploaded} photos`);
+        }
+        if (photoResult.failed > 0) {
+          console.warn(`[SYNC] Failed to upload ${photoResult.failed} photos:`, photoResult.errors);
+        }
+      } catch (photoError) {
+        console.error('[SYNC] Error uploading photos:', photoError);
+      }
+
+      // Add photo info to message
+      if (photosUploaded > 0) {
+        message += `. Wysłano ${photosUploaded} zdjęć`;
+      }
+      if (photosFailed > 0) {
+        message += `. ${photosFailed} zdjęć nie wysłano`;
+      }
+
       return {
         success: true,
         message,
@@ -659,6 +715,7 @@ export async function uploadProject(
           devicesUploaded: response.stats.devicesCreated,
           auditsUploaded: response.stats.auditsCreated,
           answersUploaded: response.stats.answersCreated,
+          photosUploaded,
         },
       };
     } else {
@@ -734,4 +791,160 @@ export async function getSyncStatus(projectId: string): Promise<SyncStatusInfo> 
     totalDevices,
     importVersion: 0, // Would come from sync state
   };
+}
+
+// -----------------------------------------------------------------------------
+// Comprehensive Sync - One Button to Sync Everything
+// -----------------------------------------------------------------------------
+
+export interface ComprehensiveSyncResult {
+  success: boolean;
+  message: string;
+  stats: {
+    devicesUploaded: number;
+    auditsUploaded: number;
+    answersUploaded: number;
+    photosUploaded: number;
+    auditsDownloaded: number;
+    auditsDeleted: number;
+  };
+  errors: string[];
+}
+
+/**
+ * Comprehensive sync - one button that:
+ * 1. Uploads all pending local data (devices, audits, answers)
+ * 2. Uploads all pending photos (after sessions are synced)
+ * 3. Downloads latest data from server (two-way sync)
+ */
+export async function comprehensiveSync(
+  projectId: string,
+  importVersion: number,
+  onProgress?: (message: string) => void
+): Promise<ComprehensiveSyncResult> {
+  const errors: string[] = [];
+  const stats = {
+    devicesUploaded: 0,
+    auditsUploaded: 0,
+    answersUploaded: 0,
+    photosUploaded: 0,
+    auditsDownloaded: 0,
+    auditsDeleted: 0,
+  };
+
+  try {
+    // Check connectivity
+    const online = await isOnline();
+    if (!online) {
+      return {
+        success: false,
+        message: 'Brak połączenia z internetem',
+        stats,
+        errors: ['Brak połączenia z internetem'],
+      };
+    }
+
+    console.log('[COMPREHENSIVE_SYNC] Starting full synchronization for project:', projectId);
+
+    // Step 1: Upload all local changes first (devices, audits, answers)
+    onProgress?.('Wysyłanie lokalnych zmian...');
+    console.log('[COMPREHENSIVE_SYNC] Step 1: Uploading local data');
+    
+    const uploadResult = await uploadProject(projectId, importVersion, onProgress);
+    if (!uploadResult.success && uploadResult.message !== 'Brak danych do wysłania') {
+      errors.push(`Upload: ${uploadResult.message}`);
+    }
+    
+    if (uploadResult.stats) {
+      stats.devicesUploaded = uploadResult.stats.devicesUploaded;
+      stats.auditsUploaded = uploadResult.stats.auditsUploaded;
+      stats.answersUploaded = uploadResult.stats.answersUploaded;
+      stats.photosUploaded = uploadResult.stats.photosUploaded || 0;
+    }
+
+    // Step 2: If photos weren't uploaded in Step 1 (upload might have skipped them), try again
+    onProgress?.('Sprawdzanie zdjęć...');
+    const { getPhotosPendingUploadForProject } = await import('../database/photos');
+    const pendingPhotos = await getPhotosPendingUploadForProject(projectId);
+    
+    if (pendingPhotos.length > 0) {
+      console.log(`[COMPREHENSIVE_SYNC] Step 2: ${pendingPhotos.length} photos still pending`);
+      onProgress?.(`Wysyłanie ${pendingPhotos.length} zdjęć...`);
+      
+      try {
+        const photoResult = await uploadPendingPhotos(projectId);
+        stats.photosUploaded += photoResult.uploaded;
+        
+        if (photoResult.failed > 0) {
+          errors.push(`${photoResult.failed} zdjęć nie wysłano: ${photoResult.errors.slice(0, 3).join(', ')}`);
+        }
+      } catch (photoError: any) {
+        console.error('[COMPREHENSIVE_SYNC] Photo upload error:', photoError);
+        errors.push(`Błąd wysyłania zdjęć: ${photoError.message}`);
+      }
+    }
+
+    // Step 3: Download latest from server (two-way sync)
+    onProgress?.('Pobieranie z serwera...');
+    console.log('[COMPREHENSIVE_SYNC] Step 3: Downloading from server');
+    
+    const downloadResult = await downloadProject(projectId, undefined, importVersion, onProgress);
+    if (!downloadResult.success) {
+      errors.push(`Download: ${downloadResult.message}`);
+    } else if (downloadResult.stats) {
+      stats.auditsDownloaded = downloadResult.stats.auditsUpdated || 0;
+      stats.auditsDeleted = downloadResult.stats.auditsDeleted || 0;
+    }
+
+    // Build summary message
+    const parts: string[] = [];
+    
+    if (stats.devicesUploaded > 0) {
+      parts.push(`${stats.devicesUploaded} urządzeń`);
+    }
+    if (stats.auditsUploaded > 0) {
+      parts.push(`${stats.auditsUploaded} audytów`);
+    }
+    if (stats.photosUploaded > 0) {
+      parts.push(`${stats.photosUploaded} zdjęć`);
+    }
+    
+    let message = '';
+    if (parts.length > 0) {
+      message = `Wysłano: ${parts.join(', ')}`;
+    }
+    
+    if (stats.auditsDeleted > 0) {
+      message += message ? `. ` : '';
+      message += `Usunięto ${stats.auditsDeleted} audytów`;
+    }
+    
+    if (errors.length > 0) {
+      message += message ? '. ' : '';
+      message += `Błędy: ${errors.length}`;
+    }
+    
+    if (!message) {
+      message = 'Wszystko zsynchronizowane';
+    }
+
+    console.log('[COMPREHENSIVE_SYNC] Complete:', { stats, errors });
+
+    return {
+      success: errors.length === 0,
+      message,
+      stats,
+      errors,
+    };
+  } catch (error: any) {
+    console.error('[COMPREHENSIVE_SYNC] Error:', error);
+    errors.push(error.message || 'Nieznany błąd');
+    
+    return {
+      success: false,
+      message: 'Błąd synchronizacji',
+      stats,
+      errors,
+    };
+  }
 }

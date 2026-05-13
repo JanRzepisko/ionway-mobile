@@ -416,6 +416,7 @@ export interface MobileAuditAnswer {
   valueJson?: string;
   comment?: string;
   answeredAt: string;
+  updatedAt?: string;
 }
 
 export interface MobileUploadResponse {

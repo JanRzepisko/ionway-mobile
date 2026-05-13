@@ -4,7 +4,7 @@
 // =============================================================================
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { View, StyleSheet, ScrollView, Alert, BackHandler, TouchableOpacity, Animated, Modal as RNModal, FlatList, TextInput } from 'react-native';
+import { View, StyleSheet, ScrollView, Alert, BackHandler, TouchableOpacity, Animated, Modal as RNModal, FlatList, TextInput, Image, Dimensions } from 'react-native';
 import { Text, ActivityIndicator, Snackbar, Searchbar } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
@@ -20,7 +20,9 @@ import { useAuditStore } from '../stores/auditStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAuthStore } from '../stores/authStore';
 import { FormTab, AuditAnswer, Device } from '../types';
-import { getExistingSessionForDevice, upsertAnswer } from '../database/audits';
+import { getExistingSessionForDevice, upsertAnswer, getPhotosBySession, AuditPhoto } from '../database';
+import { takePhoto, pickFromGallery, savePhotoLocally, deleteLocalPhotoFile } from '../services/photoService';
+import { deletePhoto as deletePhotoFromDb } from '../database/photos';
 
 type RootStackParamList = {
   Devices: undefined;
@@ -98,6 +100,13 @@ export function AuditFormScreen() {
   const [showValidation, setShowValidation] = useState(false);
   const [locationExpanded, setLocationExpanded] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
+  
+  // Photo state
+  const [photos, setPhotos] = useState<AuditPhoto[]>([]);
+  const [showPhotoModal, setShowPhotoModal] = useState(false);
+  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
+  const [isAddingPhoto, setIsAddingPhoto] = useState(false);
+  const [showPhotosTab, setShowPhotosTab] = useState(false);
 
   // Safe navigation helper - checks if we can go back, otherwise resets to Devices screen
   const safeGoBack = useCallback(() => {
@@ -200,6 +209,103 @@ export function AuditFormScreen() {
     
     loadExistingAnswers();
   }, [isBatchAudit, formConfig, currentProject?.id, user?.id, allDeviceIds]);
+
+  // Load photos for current session
+  useEffect(() => {
+    if (currentSession?.id) {
+      loadPhotos();
+    }
+  }, [currentSession?.id]);
+
+  const loadPhotos = async () => {
+    if (!currentSession?.id) return;
+    try {
+      const sessionPhotos = await getPhotosBySession(currentSession.id);
+      setPhotos(sessionPhotos);
+    } catch (e) {
+      console.error('[AuditForm] Error loading photos:', e);
+    }
+  };
+
+  // Handle adding photo (camera or gallery)
+  const handleAddPhoto = useCallback(async (source: 'camera' | 'gallery') => {
+    if (!currentSession || !currentDevice || !user || isPreviewMode) return;
+    
+    setIsAddingPhoto(true);
+    try {
+      const photo = source === 'camera' ? await takePhoto() : await pickFromGallery();
+      
+      if (photo) {
+        const savedPhotos = await savePhotoLocally(
+          photo,
+          currentSession.id,
+          currentSession.localId,
+          currentDevice.id,
+          user.id,
+          isBatchAudit ? allDeviceIds : undefined
+        );
+        
+        setPhotos(prev => [...savedPhotos, ...prev]);
+        setSnackbarMessage(`Dodano ${savedPhotos.length} zdjęć`);
+        setSnackbarVisible(true);
+      }
+    } catch (error: any) {
+      Alert.alert('Błąd', error.message || 'Nie udało się dodać zdjęcia');
+    } finally {
+      setIsAddingPhoto(false);
+    }
+  }, [currentSession, currentDevice, user, isBatchAudit, allDeviceIds, isPreviewMode]);
+
+  // Handle deleting photo
+  const handleDeletePhoto = useCallback(async (photo: AuditPhoto) => {
+    Alert.alert(
+      'Usuń zdjęcie',
+      'Czy na pewno chcesz usunąć to zdjęcie?',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Usuń',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deletePhotoFromDb(photo.localId);
+              await deleteLocalPhotoFile(photo.localUri);
+              setPhotos(prev => prev.filter(p => p.localId !== photo.localId));
+              setSnackbarMessage('Zdjęcie usunięte');
+              setSnackbarVisible(true);
+              if (photos.length <= 1) {
+                setShowPhotoModal(false);
+              }
+            } catch (e) {
+              console.error('[AuditForm] Error deleting photo:', e);
+            }
+          }
+        }
+      ]
+    );
+  }, [photos.length]);
+
+  // Show photo action sheet
+  const showPhotoOptions = useCallback(() => {
+    if (isPreviewMode) {
+      if (photos.length > 0) {
+        setSelectedPhotoIndex(0);
+        setShowPhotoModal(true);
+      }
+      return;
+    }
+    
+    Alert.alert(
+      'Dodaj zdjęcie',
+      'Wybierz źródło zdjęcia',
+      [
+        { text: 'Aparat', onPress: () => handleAddPhoto('camera') },
+        { text: 'Galeria', onPress: () => handleAddPhoto('gallery') },
+        ...(photos.length > 0 ? [{ text: 'Przeglądaj zdjęcia', onPress: () => { setSelectedPhotoIndex(0); setShowPhotoModal(true); } }] : []),
+        { text: 'Anuluj', style: 'cancel' as const }
+      ]
+    );
+  }, [isPreviewMode, photos.length, handleAddPhoto]);
 
   // Calculate tab progress
   const tabsProgress = useMemo((): Map<string, TabProgress> => {
@@ -1329,6 +1435,128 @@ export function AuditFormScreen() {
         </View>
       </RNModal>
 
+      {/* Photo Gallery Modal */}
+      <RNModal
+        visible={showPhotoModal}
+        onRequestClose={() => setShowPhotoModal(false)}
+        animationType="fade"
+        transparent={true}
+      >
+        <View style={styles.photoModalOverlay}>
+          <View style={[styles.photoModalContent, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+            {/* Header */}
+            <View style={styles.photoModalHeader}>
+              <Text style={styles.photoModalTitle}>
+                Zdjęcia ({selectedPhotoIndex + 1}/{photos.length})
+              </Text>
+              <TouchableOpacity 
+                onPress={() => setShowPhotoModal(false)}
+                style={styles.photoModalClose}
+              >
+                <Icon name="close" size={28} color={colors.white} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Photo viewer */}
+            {photos.length > 0 && (
+              <View style={styles.photoViewerContainer}>
+                <FlatList
+                  data={photos}
+                  horizontal
+                  pagingEnabled
+                  showsHorizontalScrollIndicator={false}
+                  initialScrollIndex={selectedPhotoIndex}
+                  getItemLayout={(_, index) => ({
+                    length: Dimensions.get('window').width,
+                    offset: Dimensions.get('window').width * index,
+                    index,
+                  })}
+                  onMomentumScrollEnd={(e) => {
+                    const index = Math.round(e.nativeEvent.contentOffset.x / Dimensions.get('window').width);
+                    setSelectedPhotoIndex(index);
+                  }}
+                  keyExtractor={(item) => item.localId}
+                  renderItem={({ item }) => (
+                    <View style={styles.photoSlide}>
+                      <Image
+                        source={{ uri: item.localUri }}
+                        style={styles.photoImage}
+                        resizeMode="contain"
+                      />
+                      <View style={styles.photoInfo}>
+                        <Text style={styles.photoInfoText}>{item.fileName}</Text>
+                        <Text style={styles.photoInfoDate}>
+                          {new Date(item.createdAt).toLocaleString('pl-PL')}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                />
+              </View>
+            )}
+
+            {/* Thumbnail strip */}
+            {photos.length > 1 && (
+              <ScrollView 
+                horizontal 
+                style={styles.thumbnailStrip}
+                contentContainerStyle={styles.thumbnailStripContent}
+                showsHorizontalScrollIndicator={false}
+              >
+                {photos.map((photo, index) => (
+                  <TouchableOpacity
+                    key={photo.localId}
+                    onPress={() => setSelectedPhotoIndex(index)}
+                    style={[
+                      styles.thumbnail,
+                      index === selectedPhotoIndex && styles.thumbnailActive
+                    ]}
+                  >
+                    <Image
+                      source={{ uri: photo.localUri }}
+                      style={styles.thumbnailImage}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+
+            {/* Actions */}
+            <View style={styles.photoModalActions}>
+              {!isPreviewMode && (
+                <>
+                  <TouchableOpacity
+                    style={styles.photoActionButton}
+                    onPress={() => handleAddPhoto('camera')}
+                    disabled={isAddingPhoto}
+                  >
+                    <Icon name="camera-plus" size={24} color={colors.white} />
+                    <Text style={styles.photoActionText}>Aparat</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.photoActionButton}
+                    onPress={() => handleAddPhoto('gallery')}
+                    disabled={isAddingPhoto}
+                  >
+                    <Icon name="image-plus" size={24} color={colors.white} />
+                    <Text style={styles.photoActionText}>Galeria</Text>
+                  </TouchableOpacity>
+                  {photos.length > 0 && (
+                    <TouchableOpacity
+                      style={[styles.photoActionButton, styles.photoActionDelete]}
+                      onPress={() => photos[selectedPhotoIndex] && handleDeletePhoto(photos[selectedPhotoIndex])}
+                    >
+                      <Icon name="delete" size={24} color={colors.error} />
+                      <Text style={[styles.photoActionText, { color: colors.error }]}>Usuń</Text>
+                    </TouchableOpacity>
+                  )}
+                </>
+              )}
+            </View>
+          </View>
+        </View>
+      </RNModal>
+
       {/* Sticky Header with Device Info */}
       <View style={[styles.stickyHeader, { paddingTop: insets.top + spacing.sm }]}>
         <View style={styles.headerTop}>
@@ -1496,16 +1724,35 @@ export function AuditFormScreen() {
           </View>
         </TouchableOpacity>
 
-        {/* Tab selector */}
-        {formConfig.tabs.length > 1 && (
+        {/* Tab selector - always show to allow access to photos tab */}
+        {formConfig.tabs.length >= 1 && (
           <ScrollView 
             horizontal 
             showsHorizontalScrollIndicator={false}
             style={styles.tabsScroll}
             contentContainerStyle={styles.tabsContent}
           >
+            {/* Photos tab - first */}
+            <View style={styles.tabButtonContainer}>
+              <TouchableOpacity
+                style={[
+                  styles.photoTabButton,
+                  showPhotosTab && styles.photoTabButtonActive
+                ]}
+                onPress={() => setShowPhotosTab(true)}
+              >
+                <Icon name="camera" size={18} color={showPhotosTab ? colors.white : colors.primary} />
+                {photos.length > 0 && (
+                  <Text style={[styles.photoTabBadgeText, showPhotosTab && styles.photoTabBadgeTextActive]}>
+                    {photos.length}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+            
+            {/* Form tabs */}
             {formConfig.tabs.map((tab, index) => {
-              const isActive = index === currentTabIndex;
+              const isActive = index === currentTabIndex && !showPhotosTab;
               const progress = tabsProgress.get(tab.id);
               const hasAnswers = progress && progress.answered > 0;
               const isComplete = progress?.isComplete;
@@ -1521,7 +1768,10 @@ export function AuditFormScreen() {
                 <View key={tab.id} style={styles.tabButtonContainer}>
                   <Button
                     variant={isActive ? 'primary' : 'outline'}
-                    onPress={() => setCurrentTab(index)}
+                    onPress={() => {
+                      setShowPhotosTab(false);
+                      setCurrentTab(index);
+                    }}
                     size="small"
                     icon={iconName}
                     style={hasRequiredMissing && showValidation ? styles.tabButtonWarning : styles.tabButton}
@@ -1556,8 +1806,41 @@ export function AuditFormScreen() {
         </View>
       )}
 
+      {/* Photos tab content */}
+      {showPhotosTab && (
+        <ScrollView style={styles.photosTabContent} contentContainerStyle={styles.photosTabContentContainer}>
+          <View style={styles.photosGrid}>
+            {photos.map((photo, index) => (
+              <TouchableOpacity
+                key={photo.localId}
+                style={styles.photoGridItem}
+                onPress={() => {
+                  setSelectedPhotoIndex(index);
+                  setShowPhotoModal(true);
+                }}
+              >
+                <Image 
+                  source={{ uri: photo.localUri }} 
+                  style={styles.photoGridImage}
+                  resizeMode="cover"
+                />
+              </TouchableOpacity>
+            ))}
+            {/* Add photo button */}
+            <TouchableOpacity
+              style={styles.photoGridAddButton}
+              onPress={showPhotoOptions}
+              disabled={isAddingPhoto}
+            >
+              <Icon name="camera-plus" size={32} color={colors.primary} />
+              <Text style={styles.photoGridAddText}>Dodaj zdjęcie</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      )}
+
       {/* Form */}
-      {currentTab && (
+      {!showPhotosTab && currentTab && (
         <DynamicFormRenderer
           key={`tab-${currentTabIndex}`}
           tab={currentTab}
@@ -1575,20 +1858,49 @@ export function AuditFormScreen() {
 
       {/* Bottom actions */}
       <View style={[styles.bottomActions, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]}>
-        {currentTabIndex > 0 && (
-          <Button
-            variant="outline"
-            onPress={() => setCurrentTab(currentTabIndex - 1)}
-            icon="chevron-left"
-            size="medium"
-          >
-            Poprzednia
-          </Button>
+        {/* Previous button */}
+        {showPhotosTab ? null : (
+          currentTabIndex > 0 ? (
+            <Button
+              variant="outline"
+              onPress={() => {
+                if (currentTabIndex === 0) {
+                  setShowPhotosTab(true);
+                } else {
+                  setCurrentTab(currentTabIndex - 1);
+                }
+              }}
+              icon="chevron-left"
+              size="medium"
+            >
+              Poprzednia
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onPress={() => setShowPhotosTab(true)}
+              icon="camera"
+              size="medium"
+            >
+              Zdjęcia
+            </Button>
+          )
         )}
         
         <View style={styles.spacer} />
         
-        {currentTabIndex < formConfig.tabs.length - 1 ? (
+        {showPhotosTab ? (
+          <Button
+            onPress={() => {
+              setShowPhotosTab(false);
+              setCurrentTab(0);
+            }}
+            icon="chevron-right"
+            size="medium"
+          >
+            Formularz
+          </Button>
+        ) : currentTabIndex < formConfig.tabs.length - 1 ? (
           <Button
             onPress={() => setCurrentTab(currentTabIndex + 1)}
             icon="chevron-right"
@@ -2631,6 +2943,73 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.full,
   },
   
+  // Photo tab button - same size as form tabs
+  photoTabButton: {
+    minWidth: 120,
+    height: 48,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  photoTabButtonActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  photoTabBadgeText: {
+    ...typography.labelMedium,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  photoTabBadgeTextActive: {
+    color: colors.white,
+  },
+  
+  // Photos tab content
+  photosTabContent: {
+    flex: 1,
+  },
+  photosTabContentContainer: {
+    padding: spacing.md,
+  },
+  photosGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  photoGridItem: {
+    width: '31%',
+    aspectRatio: 1,
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+    backgroundColor: colors.surfaceVariant,
+  },
+  photoGridImage: {
+    width: '100%',
+    height: '100%',
+  },
+  photoGridAddButton: {
+    width: '31%',
+    aspectRatio: 1,
+    borderRadius: borderRadius.md,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  photoGridAddText: {
+    ...typography.labelSmall,
+    color: colors.primary,
+    textAlign: 'center',
+  },
+  
   // Error
   errorBanner: {
     flexDirection: 'row',
@@ -2678,5 +3057,132 @@ const styles = StyleSheet.create({
   snackbarText: {
     ...typography.bodyMedium,
     color: colors.textPrimary,
+  },
+  
+  // Photo button
+  photoButton: {
+    width: 40,
+    height: 40,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.primaryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoButtonWithBadge: {
+    position: 'relative',
+  },
+  photoBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.full,
+    minWidth: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  photoBadgeText: {
+    ...typography.labelSmall,
+    color: colors.primaryForeground,
+    fontWeight: '600',
+  },
+  
+  // Photo Modal
+  photoModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.95)',
+  },
+  photoModalContent: {
+    flex: 1,
+  },
+  photoModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  photoModalTitle: {
+    ...typography.titleMedium,
+    color: colors.white,
+  },
+  photoModalClose: {
+    padding: spacing.sm,
+  },
+  photoViewerContainer: {
+    flex: 1,
+  },
+  photoSlide: {
+    width: Dimensions.get('window').width,
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoImage: {
+    width: Dimensions.get('window').width - spacing.lg * 2,
+    height: '80%',
+    borderRadius: borderRadius.lg,
+  },
+  photoInfo: {
+    position: 'absolute',
+    bottom: spacing.lg,
+    left: spacing.lg,
+    right: spacing.lg,
+    alignItems: 'center',
+  },
+  photoInfoText: {
+    ...typography.bodyMedium,
+    color: colors.white,
+    opacity: 0.8,
+  },
+  photoInfoDate: {
+    ...typography.bodySmall,
+    color: colors.white,
+    opacity: 0.6,
+  },
+  thumbnailStrip: {
+    maxHeight: 80,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  thumbnailStripContent: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    gap: spacing.sm,
+  },
+  thumbnail: {
+    width: 60,
+    height: 60,
+    borderRadius: borderRadius.sm,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  thumbnailActive: {
+    borderColor: colors.primary,
+  },
+  thumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  photoModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: spacing.xl,
+    paddingVertical: spacing.lg,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  photoActionButton: {
+    alignItems: 'center',
+    gap: spacing.xs,
+    padding: spacing.md,
+  },
+  photoActionDelete: {
+    marginLeft: spacing.xl,
+  },
+  photoActionText: {
+    ...typography.labelSmall,
+    color: colors.white,
   },
 });

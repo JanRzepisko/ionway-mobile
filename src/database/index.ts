@@ -101,5 +101,22 @@ export {
   syncAuditSessionsFromServer
 } from './audits';
 
+// Photos
+export {
+  createAuditPhoto,
+  createAuditPhotosForDevices,
+  getPhotosBySession,
+  getPhotosByDevice,
+  getPhotosPendingUpload,
+  getPhotosPendingUploadForProject,
+  markPhotoAsSynced,
+  markPhotoUploadError,
+  deletePhoto,
+  deletePhotosBySession,
+  getPhotoByLocalId,
+  countPhotosForDevice
+} from './photos';
+export type { AuditPhoto } from './photos';
+
 // Helper alias
 export { getDevice as getDeviceById } from './devices';

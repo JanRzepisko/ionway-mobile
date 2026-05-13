@@ -28,7 +28,8 @@ import {
   downloadProject, 
   uploadProject, 
   isOnline,
-  getSyncStatus
+  getSyncStatus,
+  comprehensiveSync
 } from '../services/syncService';
 import { 
   startBackgroundSync, 
@@ -40,6 +41,7 @@ import { fixStuckUploadingSessions } from '../database/audits';
 import { fixStuckUploadingDevices } from '../database/devices';
 import { getProjects as apiGetProjects } from '../services/api';
 import { getPendingAuditSessions } from '../database/audits';
+import { getPhotosPendingUploadForProject } from '../database/photos';
 import { flushPendingWrites } from './auditStore';
 
 interface ProjectState {
@@ -104,6 +106,7 @@ interface ProjectState {
   // Sync actions
   downloadProjectData: () => Promise<boolean>;
   uploadProjectData: () => Promise<boolean>;
+  syncAll: () => Promise<{ success: boolean; message: string }>;
   checkOnlineStatus: () => Promise<void>;
   updateSyncStatus: () => Promise<void>;
   
@@ -435,6 +438,62 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
+  // Comprehensive sync - one button to sync everything
+  syncAll: async () => {
+    const { currentProject } = get();
+    if (!currentProject) {
+      return { success: false, message: 'Brak wybranego projektu' };
+    }
+    
+    set({ 
+      isUploading: true, 
+      isDownloading: true,
+      syncError: null, 
+      syncProgress: 'Rozpoczynanie synchronizacji...' 
+    });
+    
+    // Flush pending writes
+    await flushPendingWrites();
+    
+    // Fix any stuck sessions
+    await fixStuckUploadingSessions(currentProject.id);
+    await fixStuckUploadingDevices(currentProject.id);
+    
+    try {
+      const result = await comprehensiveSync(
+        currentProject.id,
+        currentProject.importVersion,
+        (progress) => set({ syncProgress: progress })
+      );
+      
+      set({ 
+        isUploading: false, 
+        isDownloading: false,
+        syncProgress: '' 
+      });
+      
+      if (result.success) {
+        await get().updateSyncStatus();
+        // Reload devices
+        await get().loadDevices();
+      } else {
+        set({ syncError: result.errors.join(', ') || result.message });
+      }
+      
+      return { success: result.success, message: result.message };
+    } catch (error) {
+      console.error('Sync error:', error);
+      const message = error instanceof Error ? error.message : 'Błąd synchronizacji';
+      set({ 
+        isUploading: false, 
+        isDownloading: false,
+        syncProgress: '',
+        syncError: message
+      });
+      return { success: false, message };
+    }
+  },
+
   checkOnlineStatus: async () => {
     const online = await isOnline();
     set({ isOnline: online });
@@ -446,11 +505,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     
     const online = await isOnline();
     const pendingAudits = await getPendingAuditSessions(currentProject.id);
+    const pendingPhotos = await getPhotosPendingUploadForProject(currentProject.id);
     const deviceCount = await getDeviceCount(currentProject.id);
     
     set({ 
       isOnline: online,
-      pendingUploads: pendingAudits.length,
+      pendingUploads: pendingAudits.length + pendingPhotos.length,
       lastSyncAt: currentProject.lastSyncAt,
     });
   },

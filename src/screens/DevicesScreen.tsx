@@ -641,6 +641,7 @@ export function DevicesScreen() {
     loadDevices,
     downloadProjectData,
     uploadProjectData,
+    syncAll,
     checkOnlineStatus,
     loadStoredProject,
     fetchProjectsFromApi,
@@ -987,6 +988,15 @@ export function DevicesScreen() {
     if (success) {
       setSnackbarMessage('Dane wysłane pomyślnie');
       setSnackbarVisible(true);
+      setShowSyncModal(false);
+    }
+  };
+
+  const handleSyncAll = async () => {
+    const result = await syncAll();
+    setSnackbarMessage(result.message);
+    setSnackbarVisible(true);
+    if (result.success) {
       setShowSyncModal(false);
     }
   };
@@ -1394,6 +1404,35 @@ export function DevicesScreen() {
         >
           <Text style={styles.modalTitle}>Synchronizacja</Text>
           
+          {/* Main sync button - syncs everything */}
+          <View style={[styles.syncOption, { backgroundColor: colors.primaryLight, borderRadius: 12, padding: 16, marginBottom: 16 }]}>
+            <Icon name="sync" size={36} color={colors.primary} />
+            <View style={styles.syncOptionInfo}>
+              <Text style={[styles.syncOptionTitle, { fontSize: 18 }]}>Synchronizuj wszystko</Text>
+              <Text style={styles.syncOptionSubtitle}>
+                {pendingUploads > 0 
+                  ? `${pendingUploads} elementów do wysłania` 
+                  : 'Porównaj i zaktualizuj dane'}
+              </Text>
+              {syncProgress ? (
+                <Text style={[styles.syncOptionSubtitle, { color: colors.primary, marginTop: 4 }]}>
+                  {syncProgress}
+                </Text>
+              ) : null}
+            </View>
+            <Button 
+              onPress={handleSyncAll} 
+              disabled={!isOnline || isDownloading || isUploading}
+              loading={isDownloading || isUploading}
+            >
+              Synchronizuj
+            </Button>
+          </View>
+
+          <Text style={[styles.syncOptionSubtitle, { marginBottom: 8, color: colors.textSecondary }]}>
+            Lub wybierz opcję:
+          </Text>
+
           <View style={styles.syncOption}>
             <Icon name="cloud-download" size={32} color={colors.primary} />
             <View style={styles.syncOptionInfo}>
@@ -1405,6 +1444,7 @@ export function DevicesScreen() {
               disabled={!isOnline || isDownloading}
               loading={isDownloading}
               size="small"
+              variant="outline"
             >
               Pobierz
             </Button>
@@ -1415,7 +1455,7 @@ export function DevicesScreen() {
             <View style={styles.syncOptionInfo}>
               <Text style={styles.syncOptionTitle}>Wyślij dane</Text>
               <Text style={styles.syncOptionSubtitle}>
-                {pendingUploads > 0 ? `${pendingUploads} audytów do wysłania` : 'Wszystko zsynchronizowane'}
+                {pendingUploads > 0 ? `${pendingUploads} audytów/zdjęć do wysłania` : 'Wszystko zsynchronizowane'}
               </Text>
             </View>
             <Button 
@@ -1423,6 +1463,7 @@ export function DevicesScreen() {
               disabled={!isOnline || isUploading || pendingUploads === 0}
               loading={isUploading}
               size="small"
+              variant="outline"
             >
               Wyślij
             </Button>

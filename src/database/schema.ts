@@ -236,6 +236,33 @@ async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_audit_answers_sync_status ON audit_answers(sync_status);
 
     -- =========================================================================
+    -- AUDIT PHOTOS
+    -- =========================================================================
+    CREATE TABLE IF NOT EXISTS audit_photos (
+      id TEXT PRIMARY KEY,
+      local_id TEXT NOT NULL UNIQUE,
+      server_id TEXT,
+      audit_session_id TEXT NOT NULL,
+      audit_session_local_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      local_uri TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      content_type TEXT DEFAULT 'image/jpeg',
+      size_bytes INTEGER DEFAULT 0,
+      description TEXT,
+      uploaded_by_user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      sync_status TEXT NOT NULL DEFAULT 'local_only',
+      FOREIGN KEY (audit_session_id) REFERENCES audit_sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_photos_session ON audit_photos(audit_session_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_photos_device ON audit_photos(device_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_photos_local_id ON audit_photos(local_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_photos_sync_status ON audit_photos(sync_status);
+
+    -- =========================================================================
     -- SYNC QUEUE
     -- =========================================================================
     CREATE TABLE IF NOT EXISTS sync_queue (
@@ -318,8 +345,39 @@ async function runMigrations(database: SQLite.SQLiteDatabase): Promise<void> {
       console.log('[DB Migration] znacznik column already exists');
     }
   } catch (e) {
-    console.error('[DB Migration] Error in migration:', e);
-    // If ALTER fails, try a different approach - recreate will happen on next fresh install
+    console.error('[DB Migration] Error in migration 1:', e);
+  }
+  
+  // Migration 2: Create audit_photos table if not exists
+  try {
+    await database.execAsync(`
+      CREATE TABLE IF NOT EXISTS audit_photos (
+        id TEXT PRIMARY KEY,
+        local_id TEXT NOT NULL UNIQUE,
+        server_id TEXT,
+        audit_session_id TEXT NOT NULL,
+        audit_session_local_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        local_uri TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        content_type TEXT DEFAULT 'image/jpeg',
+        size_bytes INTEGER DEFAULT 0,
+        description TEXT,
+        uploaded_by_user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+        sync_status TEXT NOT NULL DEFAULT 'local_only',
+        FOREIGN KEY (audit_session_id) REFERENCES audit_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_photos_session ON audit_photos(audit_session_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_photos_device ON audit_photos(device_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_photos_local_id ON audit_photos(local_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_photos_sync_status ON audit_photos(sync_status);
+    `);
+    console.log('[DB Migration] audit_photos table ensured');
+  } catch (e) {
+    console.error('[DB Migration] Error in migration 2:', e);
   }
   
   console.log('[DB Migration] Migrations completed');
@@ -331,6 +389,7 @@ async function runMigrations(database: SQLite.SQLiteDatabase): Promise<void> {
 export async function clearAllData(): Promise<void> {
   const database = await getDatabase();
   await database.execAsync(`
+    DELETE FROM audit_photos;
     DELETE FROM audit_answers;
     DELETE FROM audit_sessions;
     DELETE FROM sync_queue;
@@ -352,6 +411,9 @@ export async function clearAllData(): Promise<void> {
 export async function clearProjectData(projectId: string): Promise<void> {
   const database = await getDatabase();
   await database.execAsync(`
+    DELETE FROM audit_photos WHERE audit_session_id IN (
+      SELECT id FROM audit_sessions WHERE project_id = '${projectId}'
+    );
     DELETE FROM audit_answers WHERE audit_session_id IN (
       SELECT id FROM audit_sessions WHERE project_id = '${projectId}'
     );
@@ -395,6 +457,7 @@ export async function getDatabaseStats(): Promise<{
   devices: number;
   auditSessions: number;
   auditAnswers: number;
+  auditPhotos: number;
   pendingUploads: number;
 }> {
   const database = await getDatabase();
@@ -411,6 +474,9 @@ export async function getDatabaseStats(): Promise<{
   const auditAnswers = await database.getFirstAsync<{ count: number }>(
     'SELECT COUNT(*) as count FROM audit_answers'
   );
+  const auditPhotos = await database.getFirstAsync<{ count: number }>(
+    'SELECT COUNT(*) as count FROM audit_photos'
+  );
   const pendingUploads = await database.getFirstAsync<{ count: number }>(
     "SELECT COUNT(*) as count FROM audit_sessions WHERE sync_status != 'synced'"
   );
@@ -420,6 +486,7 @@ export async function getDatabaseStats(): Promise<{
     devices: devices?.count ?? 0,
     auditSessions: auditSessions?.count ?? 0,
     auditAnswers: auditAnswers?.count ?? 0,
+    auditPhotos: auditPhotos?.count ?? 0,
     pendingUploads: pendingUploads?.count ?? 0,
   };
 }

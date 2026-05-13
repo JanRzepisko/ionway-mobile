@@ -303,17 +303,27 @@ export async function upsertAnswer(
   if (existing) {
     await db.runAsync(
       `UPDATE audit_answers 
-       SET value_text = ?, comment = ?, answered_at = ?, sync_status = 'local_only'
+       SET value_text = ?, comment = ?, answered_at = ?, sync_status = 'pending_upload'
        WHERE local_id = ?`,
       [value, comment ?? null, now, existing.local_id]
     );
+    
+    // Mark the session as needing re-sync (always mark as pending when answer changes)
+    const sessionResult = await db.runAsync(
+      `UPDATE audit_sessions 
+       SET sync_status = 'pending_upload'
+       WHERE local_id = ? AND sync_status NOT IN ('local_only', 'pending_upload', 'uploading')`,
+      [auditSessionLocalId]
+    );
+    
+    console.log(`[DB upsertAnswer] Session ${auditSessionLocalId} marked for re-sync: ${sessionResult.changes > 0}`);
 
     return {
       ...mapRowToAuditAnswer(existing),
       valueText: value ?? undefined,
       comment,
       answeredAt: now,
-      syncStatus: 'local_only',
+      syncStatus: 'pending_upload',
     };
   }
 
@@ -330,10 +340,21 @@ export async function upsertAnswer(
     comment,
     auditorId,
     answeredAt: now,
-    syncStatus: 'local_only',
+    syncStatus: 'pending_upload',
   };
 
   await saveAuditAnswer(answer);
+  
+  // Mark the session as needing sync when new answer is added
+  const sessionResult = await db.runAsync(
+    `UPDATE audit_sessions 
+     SET sync_status = 'pending_upload'
+     WHERE local_id = ? AND sync_status NOT IN ('local_only', 'pending_upload', 'uploading')`,
+    [auditSessionLocalId]
+  );
+  
+  console.log(`[DB upsertAnswer] New answer - Session ${auditSessionLocalId} marked for sync: ${sessionResult.changes > 0}`);
+  
   return answer;
 }
 
