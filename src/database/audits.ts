@@ -154,6 +154,7 @@ export async function getInProgressSession(
 
 /**
  * Check if device has ANY audit session (regardless of status)
+ * Searches by both device_id and device_local_id to handle different ID scenarios
  */
 export async function getExistingSessionForDevice(
   deviceId: string
@@ -162,14 +163,26 @@ export async function getExistingSessionForDevice(
   
   console.log(`[DB getExistingSessionForDevice] Looking for device: ${deviceId}`);
   
-  const row = await db.getFirstAsync<AuditSessionRow>(
+  // First try exact match on device_id
+  let row = await db.getFirstAsync<AuditSessionRow>(
     `SELECT * FROM audit_sessions 
      WHERE device_id = ? 
      ORDER BY started_at DESC LIMIT 1`,
     [deviceId]
   );
   
-  console.log(`[DB getExistingSessionForDevice] Found: ${row ? `session ${row.local_id}` : 'none'}`);
+  // If not found, also try device_local_id
+  if (!row) {
+    console.log(`[DB getExistingSessionForDevice] Not found by device_id, trying device_local_id`);
+    row = await db.getFirstAsync<AuditSessionRow>(
+      `SELECT * FROM audit_sessions 
+       WHERE device_local_id = ? 
+       ORDER BY started_at DESC LIMIT 1`,
+      [deviceId]
+    );
+  }
+  
+  console.log(`[DB getExistingSessionForDevice] Found: ${row ? `session ${row.local_id} (device_id=${row.device_id})` : 'none'}`);
 
   return row ? mapRowToAuditSession(row) : null;
 }
@@ -579,11 +592,15 @@ export async function upsertAnswer(
 export async function getAnswersBySession(sessionLocalId: string): Promise<AuditAnswer[]> {
   const db = await getDatabase();
   
+  console.log(`[DB getAnswersBySession] Query for session: ${sessionLocalId}`);
+  
   const rows = await db.getAllAsync<AuditAnswerRow>(
     'SELECT * FROM audit_answers WHERE audit_session_local_id = ? ORDER BY answered_at',
     [sessionLocalId]
   );
 
+  console.log(`[DB getAnswersBySession] Found ${rows.length} rows`);
+  
   return rows.map(mapRowToAuditAnswer);
 }
 
@@ -609,9 +626,12 @@ export async function getAnswerCountsForSessions(
     sessionLocalIds
   );
   
+  console.log(`[DB getAnswerCountsForSessions] Query for ${sessionLocalIds.length} sessions, found ${rows.length} with answers`);
+  
   const result: Record<string, number> = {};
   for (const row of rows) {
     result[row.audit_session_local_id] = row.count;
+    console.log(`[DB getAnswerCountsForSessions] Session ${row.audit_session_local_id}: ${row.count} answers`);
   }
   
   return result;
@@ -635,7 +655,14 @@ export async function getAnswer(
 export async function getAnswersMap(
   sessionLocalId: string
 ): Promise<Map<string, AuditAnswer>> {
+  console.log(`[DB getAnswersMap] Loading answers for session: ${sessionLocalId}`);
+  
   const answers = await getAnswersBySession(sessionLocalId);
+  
+  console.log(`[DB getAnswersMap] Found ${answers.length} answers`);
+  if (answers.length > 0) {
+    console.log(`[DB getAnswersMap] First answer: fieldId=${answers[0].formFieldId}, value=${answers[0].valueText}`);
+  }
   
   const map = new Map<string, AuditAnswer>();
   for (const answer of answers) {
@@ -1117,4 +1144,72 @@ function mapRowToAuditAnswer(row: AuditAnswerRow): AuditAnswer {
     answeredAt: row.answered_at,
     syncStatus: row.sync_status as SyncStatus,
   };
+}
+
+/**
+ * Diagnostic: Check for session/answer consistency
+ * Detects duplicate sessions per device and orphaned answers
+ */
+export async function diagnoseSessions(projectId: string): Promise<void> {
+  const db = await getDatabase();
+  
+  // Find devices with multiple sessions
+  const duplicates = await db.getAllAsync<{ device_id: string; count: number }>(
+    `SELECT device_id, COUNT(*) as count 
+     FROM audit_sessions 
+     WHERE project_id = ?
+     GROUP BY device_id 
+     HAVING COUNT(*) > 1`,
+    [projectId]
+  );
+  
+  if (duplicates.length > 0) {
+    console.log(`[DB Diagnose] Found ${duplicates.length} devices with multiple sessions:`);
+    for (const d of duplicates) {
+      const sessions = await db.getAllAsync<{ local_id: string; status: string; started_at: number }>(
+        'SELECT local_id, status, started_at FROM audit_sessions WHERE device_id = ? ORDER BY started_at DESC',
+        [d.device_id]
+      );
+      console.log(`[DB Diagnose] Device ${d.device_id}: ${d.count} sessions`);
+      for (const s of sessions) {
+        const answerCount = await db.getFirstAsync<{ count: number }>(
+          'SELECT COUNT(*) as count FROM audit_answers WHERE audit_session_local_id = ?',
+          [s.local_id]
+        );
+        console.log(`  - Session ${s.local_id}: status=${s.status}, answers=${answerCount?.count ?? 0}`);
+      }
+    }
+  } else {
+    console.log('[DB Diagnose] No duplicate sessions found');
+  }
+  
+  // Find orphaned answers (answers pointing to non-existent sessions)
+  const orphanedAnswers = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM audit_answers a 
+     LEFT JOIN audit_sessions s ON a.audit_session_local_id = s.local_id
+     WHERE s.local_id IS NULL`
+  );
+  
+  if (orphanedAnswers && orphanedAnswers.count > 0) {
+    console.log(`[DB Diagnose] Found ${orphanedAnswers.count} orphaned answers!`);
+  }
+  
+  // Check answer counts vs actual for a sample of sessions
+  const sampleSessions = await db.getAllAsync<{ local_id: string }>(
+    'SELECT local_id FROM audit_sessions WHERE project_id = ? LIMIT 5',
+    [projectId]
+  );
+  
+  for (const s of sampleSessions) {
+    const allAnswers = await db.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) as count FROM audit_answers WHERE audit_session_local_id = ?',
+      [s.local_id]
+    );
+    const nonEmptyAnswers = await db.getFirstAsync<{ count: number }>(
+      `SELECT COUNT(*) as count FROM audit_answers 
+       WHERE audit_session_local_id = ? AND value_text IS NOT NULL AND TRIM(value_text) != ''`,
+      [s.local_id]
+    );
+    console.log(`[DB Diagnose] Session ${s.local_id}: total=${allAnswers?.count ?? 0}, non-empty=${nonEmptyAnswers?.count ?? 0}`);
+  }
 }

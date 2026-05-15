@@ -107,6 +107,7 @@ export {
   getAuditSessionsPaginated,
   getAuditSessionCounts,
   getAnswerCountsForSessions,
+  diagnoseSessions,
 } from './audits';
 export type { PaginatedAuditSessionsResult, AuditSessionFilters } from './audits';
 

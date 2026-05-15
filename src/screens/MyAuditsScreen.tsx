@@ -34,6 +34,7 @@ import {
   getAnswerCountsForSessions,
   getFormFieldsCount,
   AuditSessionFilters,
+  diagnoseSessions,
 } from '../database';
 import { useAuthStore } from '../stores/authStore';
 
@@ -125,6 +126,9 @@ export function MyAuditsScreen() {
           fixStuckUploadingSessions(currentProject.id),
           fixStuckUploadingDevices(currentProject.id),
         ]);
+        
+        // Run diagnostic to check for data issues
+        await diagnoseSessions(currentProject.id);
         
         // Load counts for filter badges and total form fields
         const [sessionCounts, fieldsCount] = await Promise.all([
@@ -544,6 +548,13 @@ export function MyAuditsScreen() {
           };
           
           const handleCardPress = async () => {
+            console.log('[MyAudits] Card pressed:', {
+              localId: item.localId,
+              deviceId: item.deviceId,
+              status: item.status,
+              answersInList: answeredCount,
+            });
+            
             // Track interaction for in-progress items
             if (isInProgress && user) {
               await updateSessionLastInteraction(item.localId, user.id, user.fullName);

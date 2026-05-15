@@ -148,15 +148,27 @@ export function AuditFormScreen() {
   // For batch audit: start sessions for ALL devices immediately
   // For single audit: start session for that device
   useEffect(() => {
+    console.log('[AuditForm] Init effect:', {
+      sessionId,
+      deviceId,
+      deviceIds,
+      isBatchAudit,
+      hasCurrentProject: !!currentProject,
+      hasUser: !!user,
+    });
+    
     if (sessionId) {
       // Resume existing audit session (e.g., viewing completed audit)
+      console.log('[AuditForm] Resuming session:', sessionId);
       resumeAudit(sessionId);
     } else if (currentProject && user && allDeviceIds.length > 0) {
       if (isBatchAudit) {
         // Batch audit - create sessions for ALL devices
+        console.log('[AuditForm] Starting batch audit for:', allDeviceIds);
         startBatchAudit(allDeviceIds, currentProject.id, user.id);
       } else {
         // Single device audit
+        console.log('[AuditForm] Starting single audit for:', allDeviceIds[0]);
         startAudit(allDeviceIds[0], currentProject.id, user.id);
       }
     }
@@ -444,6 +456,8 @@ export function AuditFormScreen() {
               user.id,
               user.fullName
             );
+          } else {
+            console.warn(`[AuditForm] NO SESSION FOUND for device ${i+1}/${allDeviceIds.length}: devId=${devId} - ANSWER NOT SAVED!`);
           }
         } catch (error) {
           console.error(`[AuditForm] Error saving to device ${devId}:`, error);

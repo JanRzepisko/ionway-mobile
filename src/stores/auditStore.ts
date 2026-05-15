@@ -311,11 +311,15 @@ export const useAuditStore = create<AuditState>((set, get) => ({
   resumeAudit: async (sessionId: string) => {
     set({ isLoading: true, error: null });
     
+    console.log(`[AuditStore resumeAudit] Starting for sessionId: ${sessionId}`);
+    
     try {
       const session = await getAuditSession(sessionId);
       if (!session) {
         throw new Error('Sesja audytu nie znaleziona');
       }
+      
+      console.log(`[AuditStore resumeAudit] Session found: localId=${session.localId}, deviceId=${session.deviceId}, status=${session.status}`);
       
       // Try to get device by deviceId first, then by deviceLocalId
       let device = await getDevice(session.deviceId);
@@ -331,8 +335,12 @@ export const useAuditStore = create<AuditState>((set, get) => ({
         throw new Error(`Urządzenie powiązane z tym audytem nie zostało znalezione${syncInfo}. Spróbuj zsynchronizować dane.`);
       }
       
+      console.log(`[AuditStore resumeAudit] Device found: ${device.name}, id=${device.id}`);
+      
       const formConfig = await getFullFormConfig(session.projectId);
       const answersMap = await getAnswersMap(session.localId);
+      
+      console.log(`[AuditStore resumeAudit] Loaded ${answersMap.size} answers for session ${session.localId}`);
       
       set({ 
         currentSession: session,
@@ -345,6 +353,7 @@ export const useAuditStore = create<AuditState>((set, get) => ({
       
       return true;
     } catch (error) {
+      console.error(`[AuditStore resumeAudit] Error:`, error);
       set({ 
         error: error instanceof Error ? error.message : 'Błąd wznowienia audytu',
         isLoading: false 

@@ -65,6 +65,8 @@ export function DynamicFormRenderer({
       const answer = answers.get(f.id);
       return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
     }).length;
+    
+    console.log(`[DynamicForm] Progress calc: answers.size=${answers.size}, total=${total}, answered=${answered}`);
 
     return {
       total,
