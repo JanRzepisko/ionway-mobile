@@ -104,6 +104,7 @@ export {
   getAuditSessionWithDetails,
   markAllSessionsForResync,
   updateSessionLastInteraction,
+  revertSessionToInProgress,
   getAuditSessionsPaginated,
   getAuditSessionCounts,
   getAnswerCountsForSessions,

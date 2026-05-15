@@ -31,6 +31,7 @@ import {
   fixStuckUploadingDevices, 
   deleteLocalAuditSession, 
   updateSessionLastInteraction,
+  revertSessionToInProgress,
   getAnswerCountsForSessions,
   getFormFieldsCount,
   AuditSessionFilters,
@@ -306,7 +307,64 @@ export function MyAuditsScreen() {
     );
   };
 
-  // Render delete action for swipeable
+  // Handle revert session to in_progress
+  const handleRevertSession = async (session: AuditSession) => {
+    if (!user) return;
+    
+    Alert.alert(
+      'Cofnij do "W trakcie"',
+      `Czy chcesz cofnąć audyt "${deviceNames[session.deviceId] || session.deviceId}" do statusu "W trakcie"?`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Cofnij',
+          onPress: async () => {
+            try {
+              const success = await revertSessionToInProgress(session.localId, user.id, user.fullName);
+              if (success) {
+                // Refresh the list
+                setCurrentPage(1);
+                loadSessions(1);
+              }
+            } catch (error) {
+              console.error('Error reverting session:', error);
+              Alert.alert('Błąd', 'Nie udało się cofnąć audytu');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // Check if session can be reverted (only completed sessions)
+  const canRevert = (session: AuditSession) => {
+    return session.status === 'completed';
+  };
+
+  // Render revert action for swipeable (left side)
+  const renderLeftActions = (session: AuditSession, progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
+    if (!canRevert(session)) return null;
+
+    const trans = dragX.interpolate({
+      inputRange: [0, 100],
+      outputRange: [-100, 0],
+      extrapolate: 'clamp',
+    });
+
+    return (
+      <Animated.View style={[styles.revertAction, { transform: [{ translateX: trans }] }]}>
+        <TouchableOpacity
+          style={styles.revertButton}
+          onPress={() => handleRevertSession(session)}
+        >
+          <Icon name="undo-variant" size={24} color={colors.surface} />
+          <Text style={styles.revertText}>Cofnij</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    );
+  };
+
+  // Render delete action for swipeable (right side)
   const renderRightActions = (session: AuditSession, progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
     if (!canDelete(session)) return null;
 
@@ -649,11 +707,16 @@ export function MyAuditsScreen() {
             </TouchableOpacity>
           );
           
-          // Wrap in Swipeable only if can be deleted
-          if (isDeletable) {
+          // Wrap in Swipeable if can be deleted or reverted
+          const isRevertable = canRevert(item);
+          const hasSwipeActions = isDeletable || isRevertable;
+          
+          if (hasSwipeActions) {
             return (
               <Swipeable
-                renderRightActions={(progress, dragX) => renderRightActions(item, progress, dragX)}
+                renderLeftActions={isRevertable ? (progress, dragX) => renderLeftActions(item, progress, dragX) : undefined}
+                renderRightActions={isDeletable ? (progress, dragX) => renderRightActions(item, progress, dragX) : undefined}
+                overshootLeft={false}
                 overshootRight={false}
               >
                 {cardContent}
@@ -914,6 +977,27 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: spacing.xs,
     textAlign: 'center',
+  },
+  // Swipe actions
+  revertAction: {
+    backgroundColor: colors.warning,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    marginBottom: spacing.sm,
+    borderRadius: borderRadius.lg,
+  },
+  revertButton: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 80,
+    height: '100%',
+    paddingHorizontal: spacing.md,
+  },
+  revertText: {
+    ...typography.labelSmall,
+    color: colors.surface,
+    fontWeight: '600',
+    marginTop: spacing.xs,
   },
   deleteAction: {
     backgroundColor: colors.error,

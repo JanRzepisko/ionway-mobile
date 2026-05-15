@@ -1064,6 +1064,44 @@ export async function updateSessionLastInteraction(
   console.log(`[DB updateSessionLastInteraction] Session ${sessionLocalId} interaction by ${userName}`);
 }
 
+/**
+ * Revert completed session back to in_progress status
+ */
+export async function revertSessionToInProgress(
+  sessionLocalId: string,
+  userId: string,
+  userName: string
+): Promise<boolean> {
+  const db = await getDatabase();
+  const now = Date.now();
+  
+  // Only revert if currently completed
+  const session = await db.getFirstAsync<{ status: string }>(
+    'SELECT status FROM audit_sessions WHERE local_id = ?',
+    [sessionLocalId]
+  );
+  
+  if (!session || session.status !== 'completed') {
+    console.log(`[DB revertSessionToInProgress] Session ${sessionLocalId} is not completed, skipping`);
+    return false;
+  }
+  
+  await db.runAsync(
+    `UPDATE audit_sessions 
+     SET status = 'in_progress',
+         completed_at = NULL,
+         last_edited_by_id = ?,
+         last_edited_by_name = ?,
+         last_edited_at = ?,
+         sync_status = 'pending_upload'
+     WHERE local_id = ?`,
+    [userId, userName, now, sessionLocalId]
+  );
+  
+  console.log(`[DB revertSessionToInProgress] Session ${sessionLocalId} reverted to in_progress by ${userName}`);
+  return true;
+}
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
