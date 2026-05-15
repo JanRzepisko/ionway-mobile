@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { View, StyleSheet, Alert, ScrollView, TouchableOpacity, Switch, TextInput } from 'react-native';
+import { View, StyleSheet, Alert, ScrollView, TouchableOpacity, Switch, TextInput, Linking, Platform } from 'react-native';
 import { Text, ActivityIndicator } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
@@ -163,6 +163,34 @@ export function SettingsScreen() {
         ]
       );
     }
+  };
+
+  const handleUpdateApp = async () => {
+    const apkUrl = 'https://files.bmscope.com/audix.apk';
+    
+    Alert.alert(
+      'Aktualizacja aplikacji',
+      'Zostaniesz przekierowany do pobrania najnowszej wersji aplikacji. Po pobraniu otwórz plik APK, aby zainstalować aktualizację.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Pobierz',
+          onPress: async () => {
+            try {
+              const supported = await Linking.canOpenURL(apkUrl);
+              if (supported) {
+                await Linking.openURL(apkUrl);
+              } else {
+                Alert.alert('Błąd', 'Nie można otworzyć linku do pobierania.');
+              }
+            } catch (error) {
+              console.error('Error opening APK URL:', error);
+              Alert.alert('Błąd', 'Nie udało się otworzyć linku.');
+            }
+          },
+        },
+      ]
+    );
   };
 
   const insets = useSafeAreaInsets();
@@ -363,6 +391,13 @@ export function SettingsScreen() {
             <Text style={styles.appName}>Audix</Text>
             <Text style={styles.appVersion}>Wersja 1.0.0</Text>
           </View>
+          
+          {Platform.OS === 'android' && (
+            <TouchableOpacity style={styles.updateButton} onPress={handleUpdateApp}>
+              <Icon name="download" size={20} color={colors.primary} />
+              <Text style={styles.updateButtonText}>Sprawdź aktualizacje</Text>
+            </TouchableOpacity>
+          )}
         </Card>
 
         {/* Developer Mode - only in __DEV__ */}
@@ -651,6 +686,21 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     color: colors.textSecondary,
     marginTop: 2,
+  },
+  updateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    paddingVertical: spacing.md,
+    backgroundColor: colors.primaryLight,
+    borderRadius: borderRadius.md,
+  },
+  updateButtonText: {
+    ...typography.labelMedium,
+    color: colors.primary,
+    fontWeight: '600',
   },
   logoutButton: {
     marginTop: spacing.lg,
