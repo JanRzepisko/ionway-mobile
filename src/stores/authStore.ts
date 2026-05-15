@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import { User } from '../types';
 import { login as apiLogin, logout as apiLogout, clearTokens, getAccessToken, checkApiConnection } from '../services/api';
-import { clearAllData, hasLocalData } from '../database/schema';
+import { hasLocalData } from '../database/schema';
 
 interface AuthState {
   user: User | null;
@@ -77,11 +77,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Ignore logout errors - user might be offline
     }
     
-    // Clear all local data
+    // Clear ONLY auth tokens - database stays intact
+    // Database is shared between all users on this device
+    // All audits, devices, projects remain for next user
     await SecureStore.deleteItemAsync(USER_STORAGE_KEY);
     await SecureStore.deleteItemAsync(LAST_AUTH_KEY);
     await clearTokens();
-    await clearAllData();
+    
+    // DO NOT clear database - it's shared for all users
+    // clearAllData() is intentionally NOT called
     
     set({ 
       user: null, 

@@ -141,6 +141,7 @@ export interface DownloadResult {
     optionSets: number;
     auditsDeleted?: number;
     auditsUpdated?: number;
+    auditsCreated?: number;
     auditsMarkedForResend?: number;
   };
 }
@@ -355,6 +356,7 @@ export async function downloadProject(
         optionSets: optionSetEntities.length,
         auditsDeleted: auditSyncStats.deleted,
         auditsUpdated: auditSyncStats.updated,
+        auditsCreated: auditSyncStats.created,
         auditsMarkedForResend: auditSyncStats.markedForResend,
       },
     };
@@ -945,6 +947,127 @@ export async function comprehensiveSync(
       message: 'Błąd synchronizacji',
       stats,
       errors,
+    };
+  }
+}
+
+/**
+ * Force full sync - uploads ALL local audits and downloads entire database from server.
+ * NEVER deletes local data.
+ */
+export async function forceFullSync(
+  projectId: string,
+  importVersion: number,
+  onProgress?: (message: string) => void
+): Promise<ComprehensiveSyncResult> {
+  const errors: string[] = [];
+  const stats = {
+    devicesUploaded: 0,
+    auditsUploaded: 0,
+    answersUploaded: 0,
+    photosUploaded: 0,
+    auditsDownloaded: 0,
+    auditsDeleted: 0,
+  };
+
+  try {
+    console.log('[FULL_SYNC] Starting full sync for project:', projectId);
+    
+    const online = await isOnline();
+    if (!online) {
+      return {
+        success: false,
+        message: 'Brak połączenia z internetem',
+        stats,
+        errors: ['Brak połączenia z internetem'],
+      };
+    }
+
+    // Step 1: Mark ALL sessions as pending upload (force re-send everything)
+    onProgress?.('Przygotowywanie danych do wysłania...');
+    const { markAllSessionsForResync, fixStuckUploadingSessions, getAllAuditSessions } = await import('../database/audits');
+    
+    await fixStuckUploadingSessions(projectId);
+    const markedCount = await markAllSessionsForResync(projectId);
+    console.log(`[FULL_SYNC] Marked ${markedCount} sessions for upload`);
+    
+    // Get count of all local sessions
+    const allLocalSessions = await getAllAuditSessions(projectId);
+    console.log(`[FULL_SYNC] Total local sessions: ${allLocalSessions.length}`);
+
+    // Step 2: Upload all local data
+    onProgress?.(`Wysyłanie ${allLocalSessions.length} audytów...`);
+    console.log('[FULL_SYNC] Step 2: Uploading all local data');
+    
+    const uploadResult = await uploadProject(projectId, importVersion, onProgress);
+    if (!uploadResult.success && uploadResult.message !== 'Brak danych do wysłania') {
+      errors.push(`Upload: ${uploadResult.message}`);
+    }
+    
+    if (uploadResult.stats) {
+      stats.devicesUploaded = uploadResult.stats.devicesUploaded;
+      stats.auditsUploaded = uploadResult.stats.auditsUploaded;
+      stats.answersUploaded = uploadResult.stats.answersUploaded;
+    }
+
+    // Step 3: Upload photos
+    onProgress?.('Wysyłanie zdjęć...');
+    const { getPhotosPendingUploadForProject } = await import('../database/photos');
+    const pendingPhotos = await getPhotosPendingUploadForProject(projectId);
+    
+    if (pendingPhotos.length > 0) {
+      console.log(`[FULL_SYNC] Uploading ${pendingPhotos.length} photos`);
+      try {
+        const photoResult = await uploadPendingPhotos(projectId);
+        stats.photosUploaded = photoResult.uploaded;
+        if (photoResult.failed > 0) {
+          errors.push(`${photoResult.failed} zdjęć nie wysłano`);
+        }
+      } catch (e: any) {
+        errors.push(`Błąd wysyłania zdjęć: ${e.message}`);
+      }
+    }
+
+    // Step 4: Download ENTIRE database from server
+    onProgress?.('Pobieranie całej bazy z serwera...');
+    console.log('[FULL_SYNC] Step 4: Downloading entire database');
+    
+    const downloadResult = await downloadProject(projectId, undefined, importVersion, onProgress);
+    if (!downloadResult.success) {
+      errors.push(`Download: ${downloadResult.message}`);
+    } else if (downloadResult.stats) {
+      stats.auditsDownloaded = (downloadResult.stats.auditsUpdated || 0) + (downloadResult.stats.auditsCreated || 0);
+    }
+
+    // Build summary
+    let message = '';
+    const parts: string[] = [];
+    
+    if (stats.auditsUploaded > 0) parts.push(`wysłano ${stats.auditsUploaded} audytów`);
+    if (stats.photosUploaded > 0) parts.push(`${stats.photosUploaded} zdjęć`);
+    if (stats.auditsDownloaded > 0) parts.push(`pobrano ${stats.auditsDownloaded} audytów`);
+    
+    if (parts.length > 0) {
+      message = parts.join(', ');
+    } else {
+      message = 'Synchronizacja zakończona';
+    }
+
+    console.log('[FULL_SYNC] Complete:', { stats, errors });
+
+    return {
+      success: errors.length === 0,
+      message: errors.length > 0 ? `${message}. Błędy: ${errors.length}` : message,
+      stats,
+      errors,
+    };
+  } catch (error: any) {
+    console.error('[FULL_SYNC] Error:', error);
+    return {
+      success: false,
+      message: 'Błąd synchronizacji: ' + (error.message || 'Nieznany błąd'),
+      stats,
+      errors: [error.message || 'Nieznany błąd'],
     };
   }
 }

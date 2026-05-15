@@ -642,6 +642,7 @@ export function DevicesScreen() {
     downloadProjectData,
     uploadProjectData,
     syncAll,
+    forceFullSync,
     checkOnlineStatus,
     loadStoredProject,
     fetchProjectsFromApi,
@@ -994,6 +995,15 @@ export function DevicesScreen() {
 
   const handleSyncAll = async () => {
     const result = await syncAll();
+    setSnackbarMessage(result.message);
+    setSnackbarVisible(true);
+    if (result.success) {
+      setShowSyncModal(false);
+    }
+  };
+
+  const handleForceFullSync = async () => {
+    const result = await forceFullSync();
     setSnackbarMessage(result.message);
     setSnackbarVisible(true);
     if (result.success) {
@@ -1466,6 +1476,26 @@ export function DevicesScreen() {
               variant="outline"
             >
               Wyślij
+            </Button>
+          </View>
+
+          {/* Force full sync option */}
+          <View style={[styles.syncOption, { marginTop: 16, borderTopWidth: 1, borderTopColor: colors.outlineVariant, paddingTop: 16 }]}>
+            <Icon name="refresh" size={32} color={colors.error} />
+            <View style={styles.syncOptionInfo}>
+              <Text style={styles.syncOptionTitle}>Pełna synchronizacja</Text>
+              <Text style={styles.syncOptionSubtitle}>
+                Wymuś ponowne wysłanie wszystkich danych i pobierz całą bazę
+              </Text>
+            </View>
+            <Button 
+              onPress={handleForceFullSync} 
+              disabled={!isOnline || isDownloading || isUploading}
+              loading={isDownloading || isUploading}
+              size="small"
+              variant="destructive"
+            >
+              Wykonaj
             </Button>
           </View>
 

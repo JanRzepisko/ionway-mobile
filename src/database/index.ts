@@ -98,7 +98,10 @@ export {
   updateAnswerSyncStatus,
   getPendingAnswersForSession,
   getAuditStats,
-  syncAuditSessionsFromServer
+  syncAuditSessionsFromServer,
+  getCompletedAuditSessions,
+  getAuditSessionWithDetails,
+  markAllSessionsForResync,
 } from './audits';
 
 // Photos

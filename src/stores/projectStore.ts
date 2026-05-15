@@ -29,7 +29,8 @@ import {
   uploadProject, 
   isOnline,
   getSyncStatus,
-  comprehensiveSync
+  comprehensiveSync,
+  forceFullSync
 } from '../services/syncService';
 import { 
   startBackgroundSync, 
@@ -107,6 +108,7 @@ interface ProjectState {
   downloadProjectData: () => Promise<boolean>;
   uploadProjectData: () => Promise<boolean>;
   syncAll: () => Promise<{ success: boolean; message: string }>;
+  forceFullSync: () => Promise<{ success: boolean; message: string }>;
   checkOnlineStatus: () => Promise<void>;
   updateSyncStatus: () => Promise<void>;
   
@@ -484,6 +486,58 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     } catch (error) {
       console.error('Sync error:', error);
       const message = error instanceof Error ? error.message : 'Błąd synchronizacji';
+      set({ 
+        isUploading: false, 
+        isDownloading: false,
+        syncProgress: '',
+        syncError: message
+      });
+      return { success: false, message };
+    }
+  },
+
+  // Force full sync - re-uploads everything and re-downloads
+  forceFullSync: async () => {
+    const { currentProject } = get();
+    if (!currentProject) {
+      return { success: false, message: 'Brak wybranego projektu' };
+    }
+    
+    set({ 
+      isUploading: true, 
+      isDownloading: true,
+      syncError: null, 
+      syncProgress: 'Przygotowywanie pełnej synchronizacji...' 
+    });
+    
+    // Flush pending writes
+    await flushPendingWrites();
+    
+    try {
+      const result = await forceFullSync(
+        currentProject.id,
+        currentProject.importVersion,
+        (progress) => set({ syncProgress: progress })
+      );
+      
+      set({ 
+        isUploading: false, 
+        isDownloading: false,
+        syncProgress: '' 
+      });
+      
+      if (result.success) {
+        await get().updateSyncStatus();
+        // Reload devices
+        await get().loadDevices();
+      } else {
+        set({ syncError: result.errors.join(', ') || result.message });
+      }
+      
+      return { success: result.success, message: result.message };
+    } catch (error) {
+      console.error('Force full sync error:', error);
+      const message = error instanceof Error ? error.message : 'Błąd pełnej synchronizacji';
       set({ 
         isUploading: false, 
         isDownloading: false,
