@@ -20,7 +20,7 @@ import { useAuditStore } from '../stores/auditStore';
 import { useProjectStore } from '../stores/projectStore';
 import { useAuthStore } from '../stores/authStore';
 import { FormTab, AuditAnswer, Device } from '../types';
-import { getExistingSessionForDevice, upsertAnswer, getPhotosBySession, AuditPhoto } from '../database';
+import { getExistingSessionForDevice, upsertAnswer, getPhotosBySession, AuditPhoto, updateSessionLastInteraction } from '../database';
 import { takePhoto, pickFromGallery, savePhotoLocally, deleteLocalPhotoFile } from '../services/photoService';
 import { deletePhoto as deletePhotoFromDb } from '../database/photos';
 
@@ -217,6 +217,20 @@ export function AuditFormScreen() {
     }
   }, [currentSession?.id]);
 
+  // Track interaction when session is opened
+  useEffect(() => {
+    const trackInteraction = async () => {
+      if (currentSession?.localId && user && !isPreviewMode) {
+        await updateSessionLastInteraction(
+          currentSession.localId,
+          user.id,
+          user.fullName
+        );
+      }
+    };
+    trackInteraction();
+  }, [currentSession?.localId, user?.id, isPreviewMode]);
+
   const loadPhotos = async () => {
     if (!currentSession?.id) return;
     try {
@@ -307,7 +321,7 @@ export function AuditFormScreen() {
     );
   }, [isPreviewMode, photos.length, handleAddPhoto]);
 
-  // Calculate tab progress
+  // Calculate tab progress - only count non-empty, non-whitespace values
   const tabsProgress = useMemo((): Map<string, TabProgress> => {
     const progressMap = new Map<string, TabProgress>();
     
@@ -321,13 +335,13 @@ export function AuditFormScreen() {
       const total = tabFields.length;
       const answered = tabFields.filter(f => {
         const answer = answers.get(f.id);
-        return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+        return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
       }).length;
       const required = tabFields.filter(f => f.isRequired).length;
       const requiredAnswered = tabFields.filter(f => {
         if (!f.isRequired) return false;
         const answer = answers.get(f.id);
-        return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+        return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
       }).length;
 
       progressMap.set(tab.id, {
@@ -343,20 +357,20 @@ export function AuditFormScreen() {
     return progressMap;
   }, [formConfig, answers]);
 
-  // Overall progress
+  // Overall progress - only count non-empty, non-whitespace values
   const overallProgress = useMemo(() => {
     if (!formConfig) return { answered: 0, total: 0, required: 0, requiredAnswered: 0 };
     
     const total = formConfig.fields.length;
     const answered = formConfig.fields.filter(f => {
       const answer = answers.get(f.id);
-      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
     }).length;
     const required = formConfig.fields.filter(f => f.isRequired).length;
     const requiredAnswered = formConfig.fields.filter(f => {
       if (!f.isRequired) return false;
       const answer = answers.get(f.id);
-      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
     }).length;
 
     return { answered, total, required, requiredAnswered };
@@ -426,7 +440,9 @@ export function AuditFormScreen() {
               user.id,
               value,
               logicalDataColumnNumber,
-              undefined
+              undefined,
+              user.id,
+              user.fullName
             );
           }
         } catch (error) {
@@ -507,7 +523,9 @@ export function AuditFormScreen() {
             user.id,
             valueToSave,
             field?.logicalDataColumnNumber,
-            undefined
+            undefined,
+            user.id,
+            user.fullName
           );
           console.log(`[AuditForm] Per-device answer saved to DB successfully`);
         } else {
@@ -932,7 +950,12 @@ export function AuditFormScreen() {
               {formConfig?.fields.find(f => f.id === editingFieldId)?.label || 'Pytanie'}
             </Text>
 
-            <ScrollView style={styles.perDeviceModalList} contentContainerStyle={styles.perDeviceModalListContent}>
+            <ScrollView 
+              style={styles.perDeviceModalList} 
+              contentContainerStyle={styles.perDeviceModalListContent}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+            >
               {(() => {
                 const field = formConfig?.fields.find(f => f.id === editingFieldId);
                 const options = field?.optionSetId 
@@ -1179,6 +1202,8 @@ export function AuditFormScreen() {
               keyExtractor={(item) => item.session.localId}
               style={styles.copyModalList}
               contentContainerStyle={styles.copyModalListContent}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
               renderItem={({ item }) => {
                 const hasAnswers = item.answersCount > 0;
                 return (

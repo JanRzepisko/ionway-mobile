@@ -32,6 +32,9 @@ import {
   getDistinctLevels,
   getDistinctZones,
   getDistinctTypes,
+  updateSessionLastInteraction,
+  getAnswerCountsForSessions,
+  getFormFieldsCount,
 } from '../database';
 import { Device, DeviceFilters, Project } from '../types';
 
@@ -677,57 +680,44 @@ export function DevicesScreen() {
   // Selected elements for batch audit
   const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
 
+  // Completion tracking
+  const [answerCounts, setAnswerCounts] = useState<Record<string, number>>({});
+  const [totalFormFields, setTotalFormFields] = useState(0);
+
   // Pagination
   const [paginatedDevices, setPaginatedDevices] = useState<Device[]>([]);
   const [totalDevicesCount, setTotalDevicesCount] = useState(0);
+  const [filteredTotalCount, setFilteredTotalCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMoreDevices, setHasMoreDevices] = useState(false);
   const [isLoadingDevices, setIsLoadingDevices] = useState(false);
   const [isLoadingMoreDevices, setIsLoadingMoreDevices] = useState(false);
 
-  // Filtered and sorted devices - completed audits at the bottom
+  // Sorted devices - completed audits at the bottom (filtering now done at DB level)
   const filteredDevices = useMemo(() => {
-    let result = paginatedDevices;
-    
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      result = result.filter(d => 
-        d.name.toLowerCase().includes(query) || 
-        d.elementId.toLowerCase().includes(query) ||
-        (d.znacznik && d.znacznik.toLowerCase().includes(query))
-      );
-    }
-    
-    if (selectedBuildings.length > 0) {
-      result = result.filter(d => d.building && selectedBuildings.includes(d.building));
-    }
-    
-    if (selectedLevels.length > 0) {
-      result = result.filter(d => d.level && selectedLevels.includes(d.level));
-    }
-    
-    if (selectedZones.length > 0) {
-      result = result.filter(d => d.zone && selectedZones.includes(d.zone));
-    }
-    
-    if (selectedTypes.length > 0) {
-      result = result.filter(d => d.type && selectedTypes.includes(d.type));
-    }
-    
     // Sort: completed audits at the bottom
-    result = [...result].sort((a, b) => {
+    return [...paginatedDevices].sort((a, b) => {
       const aCompleted = localSessions?.find(s => s.deviceId === a.id)?.status === 'completed';
       const bCompleted = localSessions?.find(s => s.deviceId === b.id)?.status === 'completed';
       if (aCompleted && !bCompleted) return 1;
       if (!aCompleted && bCompleted) return -1;
       return 0;
     });
-    
-    return result;
-  }, [paginatedDevices, searchQuery, selectedBuildings, selectedLevels, selectedZones, selectedTypes, localSessions]);
+  }, [paginatedDevices, localSessions]);
+
+  // Build filters for database query
+  const buildDbFilters = useCallback((): DeviceFilters => {
+    const filters: DeviceFilters = {};
+    if (selectedBuildings.length > 0) filters.buildings = selectedBuildings;
+    if (selectedLevels.length > 0) filters.levels = selectedLevels;
+    if (selectedZones.length > 0) filters.zones = selectedZones;
+    if (selectedTypes.length > 0) filters.types = selectedTypes;
+    if (searchQuery) filters.search = searchQuery;
+    return filters;
+  }, [selectedBuildings, selectedLevels, selectedZones, selectedTypes, searchQuery]);
 
   // Load devices
-  const loadPaginatedDevices = useCallback(async (pageNum: number = 1, append: boolean = false) => {
+  const loadPaginatedDevices = useCallback(async (pageNum: number = 1, append: boolean = false, filters?: DeviceFilters) => {
     if (!currentProject) return;
     
     if (append) {
@@ -737,9 +727,10 @@ export function DevicesScreen() {
     }
 
     try {
+      const dbFilters = filters ?? buildDbFilters();
       const result = await getFilteredDevicesPaginated(
         currentProject.id,
-        {},
+        dbFilters,
         pageNum,
         PAGE_SIZE
       );
@@ -749,7 +740,12 @@ export function DevicesScreen() {
       } else {
         setPaginatedDevices(result.items);
       }
-      setTotalDevicesCount(result.totalCount);
+      
+      // If no filters applied, this is also the total count
+      if (Object.keys(dbFilters).length === 0) {
+        setTotalDevicesCount(result.totalCount);
+      }
+      setFilteredTotalCount(result.totalCount);
       setCurrentPage(result.page);
       setHasMoreDevices(result.hasMore);
     } catch (error) {
@@ -758,7 +754,7 @@ export function DevicesScreen() {
       setIsLoadingDevices(false);
       setIsLoadingMoreDevices(false);
     }
-  }, [currentProject]);
+  }, [currentProject, buildDbFilters]);
 
   // Init
   useEffect(() => {
@@ -771,9 +767,18 @@ export function DevicesScreen() {
 
   useEffect(() => {
     if (currentProject) {
-      loadPaginatedDevices(1, false);
+      // Load initial total count (without filters)
+      loadPaginatedDevices(1, false, {});
     }
   }, [currentProject?.id]);
+
+  // Reload when filters change
+  useEffect(() => {
+    if (currentProject) {
+      const filters = buildDbFilters();
+      loadPaginatedDevices(1, false, filters);
+    }
+  }, [selectedBuildings, selectedLevels, selectedZones, selectedTypes, searchQuery, currentProject?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -790,6 +795,10 @@ export function DevicesScreen() {
           loadDevices();
           loadPaginatedDevices(1, false);
           loadLocalSessions(currentProject.id);
+          
+          // Load form fields count for completion percentage
+          const fieldsCount = await getFormFieldsCount(currentProject.id);
+          setTotalFormFields(fieldsCount);
         }
       };
       
@@ -816,6 +825,18 @@ export function DevicesScreen() {
     const interval = setInterval(checkOnlineStatus, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  // Load answer counts when local sessions change
+  useEffect(() => {
+    const loadAnswerCounts = async () => {
+      if (localSessions && localSessions.length > 0) {
+        const sessionLocalIds = localSessions.map(s => s.localId);
+        const counts = await getAnswerCountsForSessions(sessionLocalIds);
+        setAnswerCounts(counts);
+      }
+    };
+    loadAnswerCounts();
+  }, [localSessions]);
 
   // Load cascading filter options - always show all available, filtered by selections above
   const loadCascadingFilterOptions = useCallback(async () => {
@@ -917,9 +938,10 @@ export function DevicesScreen() {
   // Handlers
   const handleLoadMoreDevices = useCallback(() => {
     if (!isLoadingMoreDevices && hasMoreDevices) {
-      loadPaginatedDevices(currentPage + 1, true);
+      const filters = buildDbFilters();
+      loadPaginatedDevices(currentPage + 1, true, filters);
     }
-  }, [isLoadingMoreDevices, hasMoreDevices, currentPage, loadPaginatedDevices]);
+  }, [isLoadingMoreDevices, hasMoreDevices, currentPage, loadPaginatedDevices, buildDbFilters]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -931,15 +953,26 @@ export function DevicesScreen() {
     setRefreshing(false);
   }, [loadDevices, loadPaginatedDevices, loadLocalSessions, currentProject]);
 
-  const toggleDeviceSelection = useCallback((deviceId: string) => {
-    // Check if device has completed audit
+  const toggleDeviceSelection = useCallback(async (deviceId: string) => {
+    // Check if device has any audit
     const existingAudit = localSessions?.find(s => s.deviceId === deviceId);
+    
+    // For completed audits - navigate to preview
     if (existingAudit?.status === 'completed') {
-      // Navigate to preview mode
       navigation.navigate('AuditForm', { deviceId, preview: true });
       return;
     }
     
+    // For in-progress audits - navigate to continue editing and track interaction
+    if (existingAudit?.status === 'in_progress') {
+      if (user) {
+        await updateSessionLastInteraction(existingAudit.localId, user.id, user.fullName);
+      }
+      navigation.navigate('AuditForm', { deviceId });
+      return;
+    }
+    
+    // For devices without audit - toggle selection
     setSelectedDevices(prev => {
       const next = new Set(prev);
       if (next.has(deviceId)) {
@@ -949,7 +982,7 @@ export function DevicesScreen() {
       }
       return next;
     });
-  }, [localSessions, navigation]);
+  }, [localSessions, navigation, user]);
 
   const selectAllVisible = useCallback(() => {
     setSelectedDevices(new Set(filteredDevices.map(d => d.id)));
@@ -1176,7 +1209,7 @@ export function DevicesScreen() {
         {hasActiveFilters && (
           <View style={styles.activeFiltersRow}>
             <Text style={styles.activeFiltersText}>
-              {filteredDevices.length} z {totalDevicesCount} elementów
+              {filteredTotalCount} z {totalDevicesCount} elementów
             </Text>
           </View>
         )}
@@ -1283,24 +1316,52 @@ export function DevicesScreen() {
           const isSelected = selectedDevices.has(item.id);
           const auditStatus = getDeviceAuditStatus(item.id);
           const isCompleted = auditStatus?.status === 'completed';
+          const isInProgress = auditStatus?.status === 'in_progress';
+          
+          // Calculate completion percentage
+          const answeredCount = auditStatus ? (answerCounts[auditStatus.localId] || 0) : 0;
+          const completionPercent = totalFormFields > 0 
+            ? Math.round((answeredCount / totalFormFields) * 100) 
+            : 0;
+          
+          // Format last edited time
+          const formatLastEdited = (timestamp?: number) => {
+            if (!timestamp) return null;
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diffMs = now.getTime() - date.getTime();
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+            
+            if (diffMins < 1) return 'przed chwilą';
+            if (diffMins < 60) return `${diffMins} min temu`;
+            if (diffHours < 24) return `${diffHours} godz. temu`;
+            if (diffDays < 7) return `${diffDays} dni temu`;
+            return date.toLocaleDateString('pl-PL');
+          };
           
           return (
             <TouchableOpacity 
               style={[
                 styles.deviceItem, 
                 isSelected && styles.deviceItemSelected,
-                isCompleted && styles.deviceItemCompleted
+                isCompleted && styles.deviceItemCompleted,
+                isInProgress && styles.deviceItemInProgress
               ]}
               onPress={() => toggleDeviceSelection(item.id)}
-              activeOpacity={isCompleted ? 1 : 0.7}
+              activeOpacity={0.7}
             >
               <View style={[
                 styles.checkbox, 
                 isSelected && styles.checkboxSelected,
-                isCompleted && styles.checkboxCompleted
+                isCompleted && styles.checkboxCompleted,
+                isInProgress && styles.checkboxInProgress
               ]}>
                 {isCompleted ? (
                   <Icon name="check-all" size={16} color={colors.success} />
+                ) : isInProgress ? (
+                  <Icon name="clock-outline" size={16} color={colors.warning} />
                 ) : isSelected ? (
                   <Icon name="check" size={16} color={colors.primaryForeground} />
                 ) : null}
@@ -1333,6 +1394,36 @@ export function DevicesScreen() {
                     </View>
                   )}
                 </View>
+                
+                {/* Show completion percentage for audits */}
+                {auditStatus && (
+                  <View style={styles.completionRow}>
+                    <View style={styles.completionBarContainer}>
+                      <View style={[
+                        styles.completionBar, 
+                        { 
+                          width: `${completionPercent}%`,
+                          backgroundColor: completionPercent === 100 ? colors.success : colors.primary 
+                        }
+                      ]} />
+                    </View>
+                    <Text style={[
+                      styles.completionText,
+                      completionPercent === 100 && { color: colors.success }
+                    ]}>
+                      {completionPercent}%
+                    </Text>
+                    {/* Show last edited info for in-progress items - inline */}
+                    {isInProgress && auditStatus?.lastEditedByName && (
+                      <View style={styles.lastEditedInfo}>
+                        <Icon name="account-edit" size={11} color={colors.warning} />
+                        <Text style={styles.lastEditedText} numberOfLines={1}>
+                          {auditStatus.lastEditedByName} • {formatLastEdited(auditStatus.lastEditedAt)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                )}
               </View>
               
               {auditStatus && (
@@ -1810,9 +1901,55 @@ const styles = StyleSheet.create({
     backgroundColor: colors.success + '20',
     borderColor: colors.success,
   },
+  checkboxInProgress: {
+    backgroundColor: colors.warning + '20',
+    borderColor: colors.warning,
+  },
   deviceItemCompleted: {
     opacity: 0.6,
     backgroundColor: colors.success + '08',
+  },
+  deviceItemInProgress: {
+    backgroundColor: colors.warning + '08',
+    borderColor: colors.warning + '40',
+    borderWidth: 1,
+  },
+  completionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  completionBarContainer: {
+    flex: 1,
+    height: 4,
+    backgroundColor: colors.outlineVariant,
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  completionBar: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  completionText: {
+    ...typography.labelSmall,
+    color: colors.primary,
+    fontWeight: '600',
+    minWidth: 32,
+    textAlign: 'right',
+  },
+  lastEditedInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    marginLeft: spacing.sm,
+    flexShrink: 1,
+  },
+  lastEditedText: {
+    ...typography.labelSmall,
+    fontSize: 10,
+    color: colors.warning,
+    fontWeight: '500',
   },
   deviceInfo: { flex: 1 },
   deviceName: { ...typography.titleSmall, color: colors.textPrimary, fontWeight: '600' },

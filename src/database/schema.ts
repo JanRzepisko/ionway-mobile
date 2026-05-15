@@ -195,8 +195,12 @@ async function initializeDatabase() {
       status TEXT NOT NULL DEFAULT 'in_progress',
       started_at INTEGER NOT NULL,
       completed_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
       created_offline INTEGER DEFAULT 1,
       notes TEXT,
+      last_edited_by_id TEXT,
+      last_edited_by_name TEXT,
+      last_edited_at INTEGER,
       sync_status TEXT NOT NULL DEFAULT 'local_only',
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
@@ -378,6 +382,47 @@ async function runMigrations(database: SQLite.SQLiteDatabase): Promise<void> {
     console.log('[DB Migration] audit_photos table ensured');
   } catch (e) {
     console.error('[DB Migration] Error in migration 2:', e);
+  }
+  
+  // Migration 3: Add created_at column to audit_sessions table
+  try {
+    const tableInfo = await database.getAllAsync<{ name: string }>(
+      `PRAGMA table_info(audit_sessions)`
+    );
+    const columnNames = tableInfo.map(col => col.name);
+    
+    if (!columnNames.includes('created_at')) {
+      console.log('[DB Migration] Adding created_at column to audit_sessions table...');
+      // SQLite requires constant default for ALTER TABLE, so use 0 then update
+      await database.execAsync(`ALTER TABLE audit_sessions ADD COLUMN created_at INTEGER DEFAULT 0`);
+      // Set created_at to started_at for existing rows
+      await database.execAsync(`UPDATE audit_sessions SET created_at = started_at WHERE created_at = 0`);
+      console.log('[DB Migration] created_at column added successfully!');
+    } else {
+      console.log('[DB Migration] created_at column already exists in audit_sessions');
+    }
+  } catch (e) {
+    console.error('[DB Migration] Error in migration 3:', e);
+  }
+  
+  // Migration 4: Add last_edited_by columns to audit_sessions
+  try {
+    const tableInfo = await database.getAllAsync<{ name: string }>(
+      `PRAGMA table_info(audit_sessions)`
+    );
+    const columnNames = tableInfo.map(col => col.name);
+    
+    if (!columnNames.includes('last_edited_by_id')) {
+      console.log('[DB Migration] Adding last_edited columns to audit_sessions...');
+      await database.execAsync(`ALTER TABLE audit_sessions ADD COLUMN last_edited_by_id TEXT`);
+      await database.execAsync(`ALTER TABLE audit_sessions ADD COLUMN last_edited_by_name TEXT`);
+      await database.execAsync(`ALTER TABLE audit_sessions ADD COLUMN last_edited_at INTEGER`);
+      console.log('[DB Migration] last_edited columns added successfully!');
+    } else {
+      console.log('[DB Migration] last_edited columns already exist in audit_sessions');
+    }
+  } catch (e) {
+    console.error('[DB Migration] Error in migration 4:', e);
   }
   
   console.log('[DB Migration] Migrations completed');

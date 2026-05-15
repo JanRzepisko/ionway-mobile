@@ -89,7 +89,8 @@ interface ProjectState {
   // Device actions
   loadDevices: () => Promise<void>;
   selectDevice: (device: Device | null) => void;
-  setFilter: (key: keyof DeviceFilters, value: string | undefined) => Promise<void>;
+  setFilter: (key: 'building' | 'level' | 'zone' | 'system' | 'group' | 'type', value: string | undefined) => Promise<void>;
+  setSearchQuery: (query: string | undefined) => Promise<void>;
   clearFilters: () => Promise<void>;
   createDevice: (data: {
     name: string;
@@ -313,20 +314,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ selectedDevice: device });
   },
 
-  setFilter: async (key: keyof DeviceFilters, value: string | undefined) => {
+  setFilter: async (key: 'building' | 'level' | 'zone' | 'system' | 'group' | 'type', value: string | undefined) => {
     const { filters } = get();
     
     // Create new filters, clearing downstream filters
     const newFilters: DeviceFilters = { ...filters };
     
-    const filterOrder: (keyof DeviceFilters)[] = [
+    const filterOrder: ('building' | 'level' | 'zone' | 'system' | 'group' | 'type')[] = [
       'building', 'level', 'zone', 'system', 'group', 'type'
     ];
     
     const keyIndex = filterOrder.indexOf(key);
     
     // Set the new value
-    newFilters[key] = value;
+    (newFilters as Record<string, string | undefined>)[key] = value;
     
     // Clear all filters after this one (cascade)
     for (let i = keyIndex + 1; i < filterOrder.length; i++) {
@@ -334,6 +335,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     
     set({ filters: newFilters });
+    await get().loadDevices();
+  },
+
+  setSearchQuery: async (query: string | undefined) => {
+    const { filters } = get();
+    set({ filters: { ...filters, searchQuery: query } });
     await get().loadDevices();
   },
 

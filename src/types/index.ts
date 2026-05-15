@@ -171,8 +171,12 @@ export interface AuditSession {
   status: AuditStatus;
   startedAt: number;
   completedAt?: number;
+  createdAt?: number;
   createdOffline: boolean;
   notes?: string;
+  lastEditedById?: string;
+  lastEditedByName?: string;
+  lastEditedAt?: number;
   syncStatus: SyncStatus;
 }
 
@@ -241,11 +245,16 @@ export interface DeviceFilterOptions {
 
 export interface DeviceFilters {
   building?: string;
+  buildings?: string[];
   level?: string;
+  levels?: string[];
   zone?: string;
+  zones?: string[];
   system?: string;
   group?: string;
   type?: string;
+  types?: string[];
+  search?: string;
   searchQuery?: string;
 }
 
@@ -405,6 +414,9 @@ export interface MobileAuditSession {
   completedAt?: string;
   createdOffline?: boolean;
   notes?: string;
+  lastEditedByUserId?: string;
+  lastEditedByUserName?: string;
+  lastEditedAt?: string;
   answers: MobileAuditAnswer[];
 }
 

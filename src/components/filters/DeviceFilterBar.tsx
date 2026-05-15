@@ -79,14 +79,14 @@ function FilterChip({ label, value, options, onSelect }: FilterChipProps) {
 }
 
 export function DeviceFilterBar() {
-  const { filters, filterOptions, setFilter, clearFilters } = useProjectStore();
+  const { filters, filterOptions, setFilter, setSearchQuery: storeSetSearchQuery, clearFilters } = useProjectStore();
   const [searchQuery, setSearchQuery] = useState(filters.searchQuery || '');
   
   const hasActiveFilters = Object.values(filters).some(v => v !== undefined);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
-    setFilter('searchQuery', query || undefined);
+    storeSetSearchQuery(query || undefined);
   };
 
   return (

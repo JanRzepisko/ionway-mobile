@@ -8,6 +8,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography } from '../theme';
 import { useAuthStore } from '../stores/authStore';
 
@@ -42,6 +43,11 @@ const Tab = createBottomTabNavigator<MainTabParamList>();
 
 // Main tabs
 function MainTabs() {
+  const insets = useSafeAreaInsets();
+  // Add safe area bottom inset to tab bar height, with minimum padding
+  const bottomPadding = Math.max(insets.bottom, 8);
+  const tabBarHeight = 60 + bottomPadding;
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -52,8 +58,8 @@ function MainTabs() {
           backgroundColor: colors.surface,
           borderTopColor: colors.outlineVariant,
           paddingTop: 8,
-          paddingBottom: 8,
-          height: 70,
+          paddingBottom: bottomPadding,
+          height: tabBarHeight,
         },
         tabBarLabelStyle: {
           ...typography.labelMedium,

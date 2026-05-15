@@ -3,8 +3,8 @@
 // Premium enterprise design for tablet usage
 // =============================================================================
 
-import React, { useCallback, useMemo } from 'react';
-import { View, StyleSheet, ScrollView, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
+import React, { useCallback, useMemo, useRef } from 'react';
+import { View, StyleSheet, ScrollView, Platform, TouchableOpacity } from 'react-native';
 import { Text, Divider, ProgressBar } from 'react-native-paper';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
 import { FormField, FormTab, OptionValue, AuditAnswer } from '../../types';
@@ -52,18 +52,18 @@ export function DynamicFormRenderer({
       .sort((a, b) => a.displayOrder - b.displayOrder);
   }, [fields]);
 
-  // Calculate progress
+  // Calculate progress - only count non-empty, non-whitespace values
   const progress = useMemo(() => {
     const total = sortedFields.length;
     const answered = sortedFields.filter(f => {
       const answer = answers.get(f.id);
-      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
     }).length;
     const required = sortedFields.filter(f => f.isRequired).length;
     const requiredAnswered = sortedFields.filter(f => {
       if (!f.isRequired) return false;
       const answer = answers.get(f.id);
-      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText !== '';
+      return answer?.valueText !== undefined && answer.valueText !== null && answer.valueText.trim() !== '';
     }).length;
 
     return {
@@ -82,18 +82,18 @@ export function DynamicFormRenderer({
     }
   }, [onCommentChange]);
 
+  const scrollViewRef = useRef<ScrollView>(null);
+
   return (
-    <KeyboardAvoidingView
-      style={styles.keyboardAvoid}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={100}
+    <ScrollView 
+      ref={scrollViewRef}
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="interactive"
+      automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
     >
-      <ScrollView 
-        style={styles.container}
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
         {/* Tab header */}
         <View style={styles.header}>
           <View style={styles.headerTop}>
@@ -213,7 +213,6 @@ export function DynamicFormRenderer({
         {/* Bottom spacing for keyboard */}
         <View style={styles.bottomSpacer} />
       </ScrollView>
-    </KeyboardAvoidingView>
   );
 }
 
@@ -225,9 +224,6 @@ function getFieldsLabel(count: number): string {
 }
 
 const styles = StyleSheet.create({
-  keyboardAvoid: {
-    flex: 1,
-  },
   container: {
     flex: 1,
     backgroundColor: colors.background,

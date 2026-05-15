@@ -23,12 +23,26 @@ import { colors, spacing, typography, borderRadius, shadows } from '../theme';
 import { useProjectStore } from '../stores/projectStore';
 import { useAuditStore } from '../stores/auditStore';
 import { AuditSession } from '../types';
-import { getAllAuditSessions, getDeviceById, fixStuckUploadingSessions, fixStuckUploadingDevices, deleteLocalAuditSession } from '../database';
+import { 
+  getAuditSessionsPaginated, 
+  getAuditSessionCounts,
+  getDeviceById, 
+  fixStuckUploadingSessions, 
+  fixStuckUploadingDevices, 
+  deleteLocalAuditSession, 
+  updateSessionLastInteraction,
+  getAnswerCountsForSessions,
+  getFormFieldsCount,
+  AuditSessionFilters,
+} from '../database';
+import { useAuthStore } from '../stores/authStore';
+
+const PAGE_SIZE = 30;
 
 type FilterStatus = 'all' | 'completed' | 'in_progress' | 'pending' | 'synced';
 
 type RootStackParamList = {
-  AuditForm: { deviceId: string; sessionId?: string; preview?: boolean };
+  AuditForm: { deviceId: string; deviceIds?: string[]; sessionId?: string; preview?: boolean };
 };
 
 export function MyAuditsScreen() {
@@ -47,42 +61,117 @@ export function MyAuditsScreen() {
     checkOnlineStatus,
   } = useProjectStore();
   const { loadLocalSessions } = useAuditStore();
+  const { user } = useAuthStore();
 
   const [sessions, setSessions] = useState<AuditSession[]>([]);
   const [deviceNames, setDeviceNames] = useState<Record<string, string>>({});
+  const [answerCounts, setAnswerCounts] = useState<Record<string, number>>({});
+  const [totalFormFields, setTotalFormFields] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<FilterStatus>('all');
+  
+  // Selection state
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set());
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [counts, setCounts] = useState({
+    all: 0,
+    completed: 0,
+    inProgress: 0,
+    pending: 0,
+    synced: 0,
+  });
 
-  const loadSessions = useCallback(async () => {
+  // Build filters for database query
+  const buildFilters = useCallback((): AuditSessionFilters => {
+    const filters: AuditSessionFilters = {};
+    
+    if (activeFilter === 'completed') {
+      filters.status = 'completed';
+    } else if (activeFilter === 'in_progress') {
+      filters.status = 'in_progress';
+    } else if (activeFilter === 'pending') {
+      filters.syncStatus = 'pending';
+    } else if (activeFilter === 'synced') {
+      filters.syncStatus = 'synced';
+    }
+    
+    if (searchQuery) {
+      filters.search = searchQuery;
+    }
+    
+    return filters;
+  }, [activeFilter, searchQuery]);
+
+  const loadSessions = useCallback(async (page: number = 1, append: boolean = false) => {
     if (!currentProject) return;
     
+    if (append) {
+      setIsLoadingMore(true);
+    } else {
+      setIsLoading(true);
+    }
+    
     try {
-      // Fix any stuck "uploading" sessions and devices first
-      await Promise.all([
-        fixStuckUploadingSessions(currentProject.id),
-        fixStuckUploadingDevices(currentProject.id),
-      ]);
+      // Fix any stuck "uploading" sessions and devices first (only on first load)
+      if (page === 1 && !append) {
+        await Promise.all([
+          fixStuckUploadingSessions(currentProject.id),
+          fixStuckUploadingDevices(currentProject.id),
+        ]);
+        
+        // Load counts for filter badges and total form fields
+        const [sessionCounts, fieldsCount] = await Promise.all([
+          getAuditSessionCounts(currentProject.id),
+          getFormFieldsCount(currentProject.id),
+        ]);
+        setCounts(sessionCounts);
+        setTotalFormFields(fieldsCount);
+      }
       
-      const allSessions = await getAllAuditSessions(currentProject.id);
-      setSessions(allSessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0)));
+      const filters = buildFilters();
+      const result = await getAuditSessionsPaginated(currentProject.id, filters, page, PAGE_SIZE);
       
-      // Load device names
-      const names: Record<string, string> = {};
-      for (const session of allSessions) {
-        if (!names[session.deviceId]) {
+      if (append) {
+        setSessions(prev => [...prev, ...result.items]);
+      } else {
+        setSessions(result.items);
+      }
+      
+      setTotalCount(result.totalCount);
+      setCurrentPage(result.page);
+      setHasMore(result.hasMore);
+      
+      // Load device names for new sessions
+      const newNames: Record<string, string> = {};
+      for (const session of result.items) {
+        if (!deviceNames[session.deviceId] && !newNames[session.deviceId]) {
           const device = await getDeviceById(session.deviceId);
-          names[session.deviceId] = device?.name || session.deviceId;
+          newNames[session.deviceId] = device?.name || session.deviceId;
         }
       }
-      setDeviceNames(names);
+      if (Object.keys(newNames).length > 0) {
+        setDeviceNames(prev => ({ ...prev, ...newNames }));
+      }
+      
+      // Load answer counts for these sessions
+      const sessionLocalIds = result.items.map(s => s.localId);
+      const newAnswerCounts = await getAnswerCountsForSessions(sessionLocalIds);
+      setAnswerCounts(prev => append ? { ...prev, ...newAnswerCounts } : newAnswerCounts);
     } catch (error) {
       console.error('Error loading sessions:', error);
     } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
-  }, [currentProject]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject, buildFilters]);
 
   useFocusEffect(
     useCallback(() => {
@@ -91,13 +180,20 @@ export function MyAuditsScreen() {
         if (isOnline) {
           await fetchProjectsFromApi();
         }
-        loadSessions();
+        loadSessions(1, false);
       };
       syncAndLoad();
       // Scroll to top when tab is focused
       listRef.current?.scrollToOffset({ offset: 0, animated: true });
-    }, [loadSessions, isOnline])
+    }, [isOnline, currentProject?.id])
   );
+  
+  // Reload when filter changes
+  useEffect(() => {
+    if (currentProject) {
+      loadSessions(1, false);
+    }
+  }, [activeFilter, currentProject?.id]);
   
   // Handle when current project was removed from server
   useEffect(() => {
@@ -112,43 +208,27 @@ export function MyAuditsScreen() {
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadSessions();
+    await loadSessions(1, false);
     setRefreshing(false);
   };
 
+  const handleLoadMore = useCallback(() => {
+    if (!isLoadingMore && hasMore) {
+      loadSessions(currentPage + 1, true);
+    }
+  }, [isLoadingMore, hasMore, currentPage, loadSessions]);
+
+  // Filter sessions by search query (client-side since search is not in DB query)
   const filteredSessions = useMemo(() => {
-    let result = sessions;
+    if (!searchQuery) return sessions;
     
-    // Filter by status
-    if (activeFilter !== 'all') {
-      result = result.filter(s => {
-        switch (activeFilter) {
-          case 'completed':
-            return s.status === 'completed';
-          case 'in_progress':
-            return s.status === 'in_progress';
-          case 'pending':
-            return s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only' || s.syncStatus === 'uploading';
-          case 'synced':
-            return s.syncStatus === 'synced';
-          default:
-            return true;
-        }
-      });
-    }
-    
-    // Filter by search
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      result = result.filter(s => {
-        const deviceName = deviceNames[s.deviceId] || '';
-        return deviceName.toLowerCase().includes(query) || 
-               s.deviceId.toLowerCase().includes(query);
-      });
-    }
-    
-    return result;
-  }, [sessions, activeFilter, searchQuery, deviceNames]);
+    const query = searchQuery.toLowerCase();
+    return sessions.filter(s => {
+      const deviceName = deviceNames[s.deviceId] || '';
+      return deviceName.toLowerCase().includes(query) || 
+             s.deviceId.toLowerCase().includes(query);
+    });
+  }, [sessions, searchQuery, deviceNames]);
 
   const getStatusColor = (session: AuditSession) => {
     if (session.status === 'completed') {
@@ -253,17 +333,65 @@ export function MyAuditsScreen() {
     { key: 'synced', label: 'Wysłane', icon: 'cloud-check' },
   ];
 
-  const getCounts = () => {
-    return {
-      all: sessions.length,
-      completed: sessions.filter(s => s.status === 'completed').length,
-      in_progress: sessions.filter(s => s.status === 'in_progress').length,
-      pending: sessions.filter(s => s.syncStatus === 'pending_upload' || s.syncStatus === 'local_only' || s.syncStatus === 'uploading').length,
-      synced: sessions.filter(s => s.syncStatus === 'synced').length,
-    };
+  const filterCounts = {
+    all: counts.all,
+    completed: counts.completed,
+    in_progress: counts.inProgress,
+    pending: counts.pending,
+    synced: counts.synced,
   };
 
-  const counts = getCounts();
+  // Selection handlers
+  const toggleSessionSelection = useCallback((sessionId: string) => {
+    setSelectedSessions(prev => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAllVisible = useCallback(() => {
+    const allIds = filteredSessions.map(s => s.localId);
+    setSelectedSessions(new Set(allIds));
+  }, [filteredSessions]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedSessions(new Set());
+  }, []);
+
+  // Handle batch continue - open selected audits as batch edit
+  const handleBatchContinue = useCallback(async () => {
+    const selectedList = Array.from(selectedSessions)
+      .map(id => sessions.find(s => s.localId === id))
+      .filter((s): s is AuditSession => s !== undefined && s.status === 'in_progress');
+    
+    if (selectedList.length === 0) {
+      Alert.alert('Brak audytów w trakcie', 'Zaznacz audyty ze statusem "W trakcie" aby kontynuować.');
+      return;
+    }
+
+    // Track interaction for all selected sessions
+    if (user) {
+      for (const session of selectedList) {
+        await updateSessionLastInteraction(session.localId, user.id, user.fullName);
+      }
+    }
+
+    // Get device IDs from selected sessions
+    const deviceIds = selectedList.map(s => s.deviceId);
+    
+    // Navigate to batch edit
+    navigation.navigate('AuditForm', {
+      deviceId: deviceIds[0],
+      deviceIds: deviceIds,
+    });
+    
+    setSelectedSessions(new Set());
+  }, [selectedSessions, sessions, user, navigation]);
 
   if (!currentProject) {
     return (
@@ -300,7 +428,7 @@ export function MyAuditsScreen() {
         <View style={styles.filtersRow}>
           {filters.map((item) => {
             const isActive = activeFilter === item.key;
-            const count = counts[item.key];
+            const count = filterCounts[item.key];
             return (
               <TouchableOpacity
                 key={item.key}
@@ -324,6 +452,27 @@ export function MyAuditsScreen() {
             );
           })}
         </View>
+        
+        {/* Selection controls and count info */}
+        <View style={styles.selectionRow}>
+          <View style={styles.selectionButtons}>
+            <TouchableOpacity style={styles.selectAllButton} onPress={selectAllVisible}>
+              <Icon name="checkbox-multiple-marked-outline" size={18} color={colors.primary} />
+              <Text style={styles.selectAllText}>Zaznacz</Text>
+            </TouchableOpacity>
+            {selectedSessions.size > 0 && (
+              <TouchableOpacity style={styles.clearSelectionButton} onPress={clearSelection}>
+                <Icon name="close-circle" size={16} color={colors.error} />
+                <Text style={styles.clearSelectionText}>({selectedSessions.size})</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {totalCount > 0 && (
+            <Text style={styles.countInfoText}>
+              {filteredSessions.length} z {counts.all}
+            </Text>
+          )}
+        </View>
       </View>
 
       {/* Sessions list */}
@@ -331,10 +480,15 @@ export function MyAuditsScreen() {
         ref={listRef}
         data={filteredSessions}
         keyExtractor={(item) => item.localId}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={[
+          styles.listContent,
+          selectedSessions.size > 0 && { paddingBottom: 100 }
+        ]}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} colors={[colors.primary]} />
         }
+        onEndReached={handleLoadMore}
+        onEndReachedThreshold={0.3}
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
@@ -351,21 +505,83 @@ export function MyAuditsScreen() {
             </View>
           )
         }
+        ListFooterComponent={
+          isLoadingMore ? (
+            <View style={styles.loadingMore}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={styles.loadingMoreText}>Ładowanie więcej...</Text>
+            </View>
+          ) : null
+        }
         renderItem={({ item }) => {
           const statusColor = getStatusColor(item);
           const deviceName = deviceNames[item.deviceId] || item.deviceId;
           const isDeletable = canDelete(item);
+          const isInProgress = item.status === 'in_progress';
+          const isSelected = selectedSessions.has(item.localId);
+          
+          // Calculate completion percentage
+          const answeredCount = answerCounts[item.localId] || 0;
+          const completionPercent = totalFormFields > 0 
+            ? Math.round((answeredCount / totalFormFields) * 100) 
+            : 0;
+          
+          // Format last edited time
+          const formatLastEdited = (timestamp?: number) => {
+            if (!timestamp) return null;
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diffMs = now.getTime() - date.getTime();
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+            
+            if (diffMins < 1) return 'przed chwilą';
+            if (diffMins < 60) return `${diffMins} min temu`;
+            if (diffHours < 24) return `${diffHours} godz. temu`;
+            if (diffDays < 7) return `${diffDays} dni temu`;
+            return date.toLocaleDateString('pl-PL');
+          };
+          
+          const handleCardPress = async () => {
+            // Track interaction for in-progress items
+            if (isInProgress && user) {
+              await updateSessionLastInteraction(item.localId, user.id, user.fullName);
+            }
+            navigation.navigate('AuditForm', { 
+              deviceId: item.deviceId, 
+              sessionId: item.localId,
+              preview: item.status === 'completed'
+            });
+          };
+
+          const handleCheckboxPress = () => {
+            toggleSessionSelection(item.localId);
+          };
           
           const cardContent = (
             <TouchableOpacity 
-              style={styles.sessionCard}
-              onPress={() => navigation.navigate('AuditForm', { 
-                deviceId: item.deviceId, 
-                sessionId: item.localId,
-                preview: item.status === 'completed' || item.status === 'synced'
-              })}
+              style={[
+                styles.sessionCard, 
+                isInProgress && styles.sessionCardInProgress,
+                isSelected && styles.sessionCardSelected
+              ]}
+              onPress={handleCardPress}
               activeOpacity={0.7}
             >
+              {/* Checkbox */}
+              <TouchableOpacity 
+                style={styles.checkboxContainer}
+                onPress={handleCheckboxPress}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Icon 
+                  name={isSelected ? 'checkbox-marked' : 'checkbox-blank-outline'} 
+                  size={24} 
+                  color={isSelected ? colors.primary : colors.textSecondary} 
+                />
+              </TouchableOpacity>
+              
               <View style={[styles.statusIndicator, { backgroundColor: statusColor }]} />
               
               <View style={styles.sessionContent}>
@@ -380,16 +596,32 @@ export function MyAuditsScreen() {
                 </View>
                 
                 <View style={styles.sessionMeta}>
-                  <View style={styles.metaItem}>
-                    <Icon name="calendar" size={14} color={colors.textSecondary} />
-                    <Text style={styles.metaText}>{formatDate(item.startedAt)}</Text>
-                  </View>
-                  {isDeletable && (
+                  <View style={styles.metaLeft}>
                     <View style={styles.metaItem}>
-                      <Icon name="gesture-swipe-left" size={14} color={colors.textDisabled} />
-                      <Text style={[styles.metaText, { color: colors.textDisabled }]}>przesuń aby usunąć</Text>
+                      <Icon name="calendar" size={14} color={colors.textSecondary} />
+                      <Text style={styles.metaText}>{formatDate(item.startedAt)}</Text>
+                    </View>
+                    <View style={styles.metaItem}>
+                      <Icon name="format-list-checks" size={14} color={completionPercent === 100 ? colors.success : colors.textSecondary} />
+                      <Text style={[styles.metaText, completionPercent === 100 && { color: colors.success, fontWeight: '600' }]}>
+                        {completionPercent}% ({answeredCount}/{totalFormFields})
+                      </Text>
+                    </View>
+                  </View>
+                  {/* Show last edited info for in-progress items - on the right */}
+                  {isInProgress && item.lastEditedByName && (
+                    <View style={styles.lastEditedInfo}>
+                      <Icon name="account-edit" size={12} color={colors.warning} />
+                      <Text style={styles.lastEditedText} numberOfLines={1}>
+                        {item.lastEditedByName} • {formatLastEdited(item.lastEditedAt)}
+                      </Text>
                     </View>
                   )}
+                </View>
+                
+                {/* Progress bar */}
+                <View style={styles.progressBarContainer}>
+                  <View style={[styles.progressBar, { width: `${completionPercent}%`, backgroundColor: completionPercent === 100 ? colors.success : colors.primary }]} />
                 </View>
 
                 {item.completedAt && (
@@ -421,6 +653,25 @@ export function MyAuditsScreen() {
           return cardContent;
         }}
       />
+
+      {/* Bottom action bar when items selected */}
+      {selectedSessions.size > 0 && (
+        <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, spacing.sm) + spacing.md }]}>
+          <View style={styles.selectedInfo}>
+            <Icon name="checkbox-multiple-marked" size={22} color={colors.primary} />
+            <Text style={styles.selectedCount}>
+              {selectedSessions.size}
+            </Text>
+          </View>
+          <TouchableOpacity 
+            style={styles.continueSelectedButton}
+            onPress={handleBatchContinue}
+          >
+            <Icon name="clipboard-edit" size={18} color={colors.surface} />
+            <Text style={styles.continueSelectedText}>Kontynuuj</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -499,6 +750,14 @@ const styles = StyleSheet.create({
   filterBadgeTextActive: {
     color: colors.primaryForeground,
   },
+  countInfo: {
+    marginTop: spacing.sm,
+    alignItems: 'center',
+  },
+  countInfoText: {
+    ...typography.labelSmall,
+    color: colors.textSecondary,
+  },
   listContent: {
     padding: spacing.md,
     paddingBottom: spacing.xl,
@@ -507,18 +766,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    marginBottom: spacing.sm,
-    overflow: 'hidden',
+    borderRadius: borderRadius.md,
+    marginBottom: spacing.xs,
+    paddingRight: spacing.sm,
     ...shadows.sm,
   },
+  sessionCardInProgress: {
+    backgroundColor: colors.warning + '06',
+    borderWidth: 1,
+    borderColor: colors.warning + '20',
+  },
   statusIndicator: {
-    width: 4,
+    width: 3,
     alignSelf: 'stretch',
   },
   sessionContent: {
     flex: 1,
-    padding: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
   },
   sessionHeader: {
     flexDirection: 'row',
@@ -547,8 +812,13 @@ const styles = StyleSheet.create({
   },
   sessionMeta: {
     flexDirection: 'row',
-    gap: spacing.lg,
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginTop: spacing.xs,
+  },
+  metaLeft: {
+    flexDirection: 'row',
+    gap: spacing.lg,
   },
   metaItem: {
     flexDirection: 'row',
@@ -558,6 +828,24 @@ const styles = StyleSheet.create({
   metaText: {
     ...typography.bodySmall,
     color: colors.textSecondary,
+  },
+  lastEditedInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 1,
+    maxWidth: '40%',
+  },
+  progressBarContainer: {
+    height: 4,
+    backgroundColor: colors.outlineVariant,
+    borderRadius: 2,
+    marginTop: spacing.sm,
+    overflow: 'hidden',
+  },
+  progressBar: {
+    height: '100%',
+    borderRadius: 2,
   },
   completedRow: {
     flexDirection: 'row',
@@ -569,6 +857,12 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     color: colors.success,
   },
+  lastEditedText: {
+    ...typography.labelSmall,
+    color: colors.warning,
+    fontWeight: '500',
+    fontSize: 11,
+  },
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -577,6 +871,17 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     ...typography.bodyMedium,
+    color: colors.textSecondary,
+  },
+  loadingMore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.lg,
+    gap: spacing.sm,
+  },
+  loadingMoreText: {
+    ...typography.bodySmall,
     color: colors.textSecondary,
   },
   emptyContainer: {
@@ -618,5 +923,87 @@ const styles = StyleSheet.create({
     color: colors.surface,
     fontWeight: '600',
     marginTop: spacing.xs,
+  },
+  
+  // Selection styles
+  selectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: spacing.sm,
+  },
+  selectionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  selectAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  selectAllText: {
+    ...typography.labelMedium,
+    color: colors.primary,
+    fontWeight: '500',
+  },
+  clearSelectionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  clearSelectionText: {
+    ...typography.labelMedium,
+    color: colors.error,
+    fontWeight: '500',
+  },
+  checkboxContainer: {
+    padding: spacing.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sessionCardSelected: {
+    backgroundColor: colors.primary + '10',
+    borderWidth: 1,
+    borderColor: colors.primary + '40',
+  },
+  bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.outlineVariant,
+    ...shadows.lg,
+  },
+  selectedInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  selectedCount: {
+    ...typography.titleSmall,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  continueSelectedButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: borderRadius.md,
+  },
+  continueSelectedText: {
+    ...typography.labelMedium,
+    color: colors.surface,
+    fontWeight: '600',
   },
 });

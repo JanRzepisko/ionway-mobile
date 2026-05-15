@@ -114,18 +114,36 @@ function buildFilterQuery(
   let whereClause = 'WHERE project_id = ?';
   const params: (string | null)[] = [projectId];
 
-  if (filters.building) {
+  // Support both single and multiple buildings
+  if (filters.buildings && filters.buildings.length > 0) {
+    const placeholders = filters.buildings.map(() => '?').join(',');
+    whereClause += ` AND building IN (${placeholders})`;
+    params.push(...filters.buildings);
+  } else if (filters.building) {
     whereClause += ' AND building = ?';
     params.push(filters.building);
   }
-  if (filters.level) {
+  
+  // Support both single and multiple levels
+  if (filters.levels && filters.levels.length > 0) {
+    const placeholders = filters.levels.map(() => '?').join(',');
+    whereClause += ` AND level IN (${placeholders})`;
+    params.push(...filters.levels);
+  } else if (filters.level) {
     whereClause += ' AND level = ?';
     params.push(filters.level);
   }
-  if (filters.zone) {
+  
+  // Support both single and multiple zones
+  if (filters.zones && filters.zones.length > 0) {
+    const placeholders = filters.zones.map(() => '?').join(',');
+    whereClause += ` AND zone IN (${placeholders})`;
+    params.push(...filters.zones);
+  } else if (filters.zone) {
     whereClause += ' AND zone = ?';
     params.push(filters.zone);
   }
+  
   if (filters.system) {
     whereClause += ' AND system = ?';
     params.push(filters.system);
@@ -134,14 +152,23 @@ function buildFilterQuery(
     whereClause += ' AND "group" = ?';
     params.push(filters.group);
   }
-  if (filters.type) {
+  
+  // Support both single and multiple types
+  if (filters.types && filters.types.length > 0) {
+    const placeholders = filters.types.map(() => '?').join(',');
+    whereClause += ` AND type IN (${placeholders})`;
+    params.push(...filters.types);
+  } else if (filters.type) {
     whereClause += ' AND type = ?';
     params.push(filters.type);
   }
-  if (filters.searchQuery) {
-    whereClause += ' AND (name LIKE ? OR element_id LIKE ? OR drawing_number LIKE ?)';
-    const search = `%${filters.searchQuery}%`;
-    params.push(search, search, search);
+  
+  // Support both search and searchQuery
+  const searchTerm = filters.search || filters.searchQuery;
+  if (searchTerm) {
+    whereClause += ' AND (name LIKE ? OR element_id LIKE ? OR znacznik LIKE ? OR drawing_number LIKE ?)';
+    const search = `%${searchTerm}%`;
+    params.push(search, search, search, search);
   }
 
   return { whereClause, params };

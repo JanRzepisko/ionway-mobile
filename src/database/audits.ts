@@ -238,6 +238,118 @@ export async function getAllAuditSessions(projectId: string): Promise<AuditSessi
   return rows.map(mapRowToAuditSession);
 }
 
+export interface PaginatedAuditSessionsResult {
+  items: AuditSession[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+export interface AuditSessionFilters {
+  status?: 'all' | 'completed' | 'in_progress';
+  syncStatus?: 'all' | 'pending' | 'synced';
+  search?: string;
+}
+
+/**
+ * Get paginated audit sessions for a project with optional filters
+ */
+export async function getAuditSessionsPaginated(
+  projectId: string,
+  filters: AuditSessionFilters = {},
+  page: number = 1,
+  pageSize: number = 50
+): Promise<PaginatedAuditSessionsResult> {
+  const db = await getDatabase();
+  
+  // Build WHERE clause
+  const conditions: string[] = ['project_id = ?'];
+  const params: (string | number)[] = [projectId];
+  
+  if (filters.status && filters.status !== 'all') {
+    conditions.push('status = ?');
+    params.push(filters.status);
+  }
+  
+  if (filters.syncStatus && filters.syncStatus !== 'all') {
+    if (filters.syncStatus === 'pending') {
+      conditions.push("sync_status IN ('pending_upload', 'local_only', 'uploading')");
+    } else if (filters.syncStatus === 'synced') {
+      conditions.push("sync_status = 'synced'");
+    }
+  }
+  
+  const whereClause = conditions.join(' AND ');
+  
+  // Get total count
+  const countResult = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM audit_sessions WHERE ${whereClause}`,
+    params
+  );
+  const totalCount = countResult?.count ?? 0;
+  
+  // Get paginated items
+  const offset = (page - 1) * pageSize;
+  const rows = await db.getAllAsync<AuditSessionRow>(
+    `SELECT * FROM audit_sessions 
+     WHERE ${whereClause}
+     ORDER BY started_at DESC
+     LIMIT ? OFFSET ?`,
+    [...params, pageSize, offset]
+  );
+  
+  const items = rows.map(mapRowToAuditSession);
+  const hasMore = offset + items.length < totalCount;
+  
+  return {
+    items,
+    totalCount,
+    page,
+    pageSize,
+    hasMore,
+  };
+}
+
+/**
+ * Get audit session counts by status/sync for a project
+ */
+export async function getAuditSessionCounts(projectId: string): Promise<{
+  all: number;
+  completed: number;
+  inProgress: number;
+  pending: number;
+  synced: number;
+}> {
+  const db = await getDatabase();
+  
+  const result = await db.getFirstAsync<{
+    total: number;
+    completed: number;
+    in_progress: number;
+    pending: number;
+    synced: number;
+  }>(
+    `SELECT 
+       COUNT(*) as total,
+       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+       SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+       SUM(CASE WHEN sync_status IN ('pending_upload', 'local_only', 'uploading') THEN 1 ELSE 0 END) as pending,
+       SUM(CASE WHEN sync_status = 'synced' THEN 1 ELSE 0 END) as synced
+     FROM audit_sessions 
+     WHERE project_id = ?`,
+    [projectId]
+  );
+  
+  return {
+    all: result?.total ?? 0,
+    completed: result?.completed ?? 0,
+    inProgress: result?.in_progress ?? 0,
+    pending: result?.pending ?? 0,
+    synced: result?.synced ?? 0,
+  };
+}
+
 /**
  * Get all completed/synced audit sessions for browsing (wszystkie zrobione audyty)
  */
@@ -385,7 +497,9 @@ export async function upsertAnswer(
   auditorId: string,
   value: string | null,
   logicalDataColumnNumber?: number,
-  comment?: string
+  comment?: string,
+  editorId?: string,
+  editorName?: string
 ): Promise<AuditAnswer> {
   const db = await getDatabase();
   
@@ -409,15 +523,18 @@ export async function upsertAnswer(
       [value, comment ?? null, now, existing.local_id]
     );
     
-    // Mark the session as needing re-sync (always mark as pending when answer changes)
-    const sessionResult = await db.runAsync(
+    // Mark the session as needing re-sync and update last edited info
+    await db.runAsync(
       `UPDATE audit_sessions 
-       SET sync_status = 'pending_upload'
-       WHERE local_id = ? AND sync_status NOT IN ('local_only', 'pending_upload', 'uploading')`,
-      [auditSessionLocalId]
+       SET sync_status = 'pending_upload',
+           last_edited_by_id = ?,
+           last_edited_by_name = ?,
+           last_edited_at = ?
+       WHERE local_id = ?`,
+      [editorId ?? auditorId, editorName ?? null, now, auditSessionLocalId]
     );
     
-    console.log(`[DB upsertAnswer] Session ${auditSessionLocalId} marked for re-sync: ${sessionResult.changes > 0}`);
+    console.log(`[DB upsertAnswer] Session ${auditSessionLocalId} marked for re-sync, editor: ${editorName}`);
 
     return {
       ...mapRowToAuditAnswer(existing),
@@ -468,6 +585,36 @@ export async function getAnswersBySession(sessionLocalId: string): Promise<Audit
   );
 
   return rows.map(mapRowToAuditAnswer);
+}
+
+/**
+ * Get answer counts for multiple sessions at once (for displaying % completion)
+ * Only counts answers with non-empty, non-whitespace values
+ */
+export async function getAnswerCountsForSessions(
+  sessionLocalIds: string[]
+): Promise<Record<string, number>> {
+  if (sessionLocalIds.length === 0) return {};
+  
+  const db = await getDatabase();
+  
+  const placeholders = sessionLocalIds.map(() => '?').join(',');
+  const rows = await db.getAllAsync<{ audit_session_local_id: string; count: number }>(
+    `SELECT audit_session_local_id, COUNT(*) as count 
+     FROM audit_answers 
+     WHERE audit_session_local_id IN (${placeholders}) 
+       AND value_text IS NOT NULL 
+       AND TRIM(value_text) != ''
+     GROUP BY audit_session_local_id`,
+    sessionLocalIds
+  );
+  
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    result[row.audit_session_local_id] = row.count;
+  }
+  
+  return result;
 }
 
 export async function getAnswer(
@@ -620,6 +767,9 @@ export async function syncAuditSessionsFromServer(
     notes?: string;
     updatedAt?: string;
     answerCount?: number;
+    lastEditedByUserId?: string;
+    lastEditedByUserName?: string;
+    lastEditedAt?: string;
     answers: Array<{
       id: string;
       mobileLocalId: string;
@@ -671,15 +821,23 @@ export async function syncAuditSessionsFromServer(
                           localSession.completed_at !== serverCompletedAt;
         
         if (needsUpdate) {
+          const serverLastEditedAt = serverSession.lastEditedAt 
+            ? new Date(serverSession.lastEditedAt).getTime() 
+            : null;
+          
           await db.runAsync(
             `UPDATE audit_sessions 
-             SET status = ?, completed_at = ?, notes = ?, server_id = ?
+             SET status = ?, completed_at = ?, notes = ?, server_id = ?,
+                 last_edited_by_id = ?, last_edited_by_name = ?, last_edited_at = ?
              WHERE local_id = ?`,
             [
               serverStatus,
               serverCompletedAt,
               serverSession.notes ?? null,
               serverSession.id,
+              serverSession.lastEditedByUserId ?? null,
+              serverSession.lastEditedByUserName ?? null,
+              serverLastEditedAt,
               serverSession.mobileLocalId
             ]
           );
@@ -743,25 +901,33 @@ export async function syncAuditSessionsFromServer(
       const serverStatus = mapServerStatus(serverSession.status);
       const serverStartedAt = new Date(serverSession.startedAt).getTime();
       const serverCompletedAt = serverSession.completedAt ? new Date(serverSession.completedAt).getTime() : null;
+      const serverLastEditedAt = serverSession.lastEditedAt 
+        ? new Date(serverSession.lastEditedAt).getTime() 
+        : null;
       const now = Date.now();
       
       await db.runAsync(
         `INSERT INTO audit_sessions 
-         (id, local_id, server_id, project_id, device_id, auditor_id, 
-          status, started_at, completed_at, created_at, notes, sync_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')`,
+         (id, local_id, server_id, project_id, device_id, device_local_id, auditor_id, 
+          status, started_at, completed_at, created_at, notes, 
+          last_edited_by_id, last_edited_by_name, last_edited_at, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')`,
         [
           serverSession.id,
           serverSession.mobileLocalId,
           serverSession.id,
           projectId,
           serverSession.deviceId,
+          serverSession.deviceId, // device_local_id same as device_id for server sessions
           serverSession.auditorId,
           serverStatus,
           serverStartedAt,
           serverCompletedAt,
           now,
-          serverSession.notes ?? null
+          serverSession.notes ?? null,
+          serverSession.lastEditedByUserId ?? null,
+          serverSession.lastEditedByUserName ?? null,
+          serverLastEditedAt
         ]
       );
       
@@ -844,6 +1010,33 @@ export async function getAuditStats(projectId: string): Promise<{
   };
 }
 
+/**
+ * Update session last interaction info when user clicks/opens it
+ */
+export async function updateSessionLastInteraction(
+  sessionLocalId: string,
+  userId: string,
+  userName: string
+): Promise<void> {
+  const db = await getDatabase();
+  const now = Date.now();
+  
+  await db.runAsync(
+    `UPDATE audit_sessions 
+     SET last_edited_by_id = ?,
+         last_edited_by_name = ?,
+         last_edited_at = ?,
+         sync_status = CASE 
+           WHEN sync_status = 'synced' THEN 'pending_upload'
+           ELSE sync_status
+         END
+     WHERE local_id = ?`,
+    [userId, userName, now, sessionLocalId]
+  );
+  
+  console.log(`[DB updateSessionLastInteraction] Session ${sessionLocalId} interaction by ${userName}`);
+}
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
@@ -859,8 +1052,12 @@ interface AuditSessionRow {
   status: string;
   started_at: number;
   completed_at: number | null;
+  created_at: number | null;
   created_offline: number;
   notes: string | null;
+  last_edited_by_id: string | null;
+  last_edited_by_name: string | null;
+  last_edited_at: number | null;
   sync_status: string;
 }
 
@@ -893,8 +1090,12 @@ function mapRowToAuditSession(row: AuditSessionRow): AuditSession {
     status: row.status as AuditStatus,
     startedAt: row.started_at,
     completedAt: row.completed_at ?? undefined,
+    createdAt: row.created_at ?? undefined,
     createdOffline: row.created_offline === 1,
     notes: row.notes ?? undefined,
+    lastEditedById: row.last_edited_by_id ?? undefined,
+    lastEditedByName: row.last_edited_by_name ?? undefined,
+    lastEditedAt: row.last_edited_at ?? undefined,
     syncStatus: row.sync_status as SyncStatus,
   };
 }

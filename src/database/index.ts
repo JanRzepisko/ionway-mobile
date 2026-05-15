@@ -59,6 +59,7 @@ export {
   getFormFieldsByTab,
   getFormFieldsByTabType,
   deleteFormFieldsByProject,
+  getFormFieldsCount,
   saveOptionSet,
   saveOptionSets,
   getOptionSets,
@@ -102,7 +103,12 @@ export {
   getCompletedAuditSessions,
   getAuditSessionWithDetails,
   markAllSessionsForResync,
+  updateSessionLastInteraction,
+  getAuditSessionsPaginated,
+  getAuditSessionCounts,
+  getAnswerCountsForSessions,
 } from './audits';
+export type { PaginatedAuditSessionsResult, AuditSessionFilters } from './audits';
 
 // Photos
 export {

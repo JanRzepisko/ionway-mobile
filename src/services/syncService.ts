@@ -516,6 +516,9 @@ export async function uploadProject(
         completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : undefined,
         createdOffline: session.createdOffline ?? true,
         notes: session.notes,
+        lastEditedByUserId: session.lastEditedById,
+        lastEditedByUserName: session.lastEditedByName,
+        lastEditedAt: session.lastEditedAt ? new Date(session.lastEditedAt).toISOString() : undefined,
         answers: mobileAnswers,
       });
     }

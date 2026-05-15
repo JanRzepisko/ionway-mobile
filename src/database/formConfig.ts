@@ -159,6 +159,21 @@ export async function deleteFormFieldsByProject(projectId: string): Promise<void
   await db.runAsync('DELETE FROM form_fields WHERE project_id = ?', [projectId]);
 }
 
+/**
+ * Get the total count of active form fields for a project
+ */
+export async function getFormFieldsCount(projectId: string): Promise<number> {
+  const db = await getDatabase();
+  
+  const result = await db.getFirstAsync<{ count: number }>(
+    `SELECT COUNT(*) as count FROM form_fields 
+     WHERE project_id = ? AND is_active = 1`,
+    [projectId]
+  );
+  
+  return result?.count ?? 0;
+}
+
 // -----------------------------------------------------------------------------
 // Option Sets
 // -----------------------------------------------------------------------------
